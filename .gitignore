@@ -1,0 +1,10 @@
+.venv/
+data/
+work/
+dist/
+build/
+__pycache__/
+*.pyc
+*.log
+vendor/wx4py/
+vendor/wxauto41/

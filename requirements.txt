@@ -1,0 +1,4 @@
+pywin32==312
+uiautomation==2.0.29
+Pillow==12.3.0
+pystray==0.19.5

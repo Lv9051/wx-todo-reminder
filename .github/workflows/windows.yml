@@ -1,0 +1,25 @@
+name: Windows build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/build_release.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: WXTodoReminder-Windows-x64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
