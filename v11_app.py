@@ -95,6 +95,7 @@ class ReminderApp(LegacyApp):
         self.wx_thread = None
         self.snapshot_sequence = 0
         self.last_cleanup = float('-inf')
+        self.undo_records = {}
         with self.connect() as db:
             needs_backup = 'purge_after' not in {r[1] for r in db.execute('PRAGMA table_info(tasks)')} and db.execute('SELECT count(*) FROM tasks').fetchone()[0]>0
         if needs_backup:
@@ -124,6 +125,9 @@ class ReminderApp(LegacyApp):
                     unique_key TEXT NOT NULL UNIQUE);
                 CREATE INDEX IF NOT EXISTS jobs_pending ON jobs(status,ready_at);
             ''')
+            # 重启不能确定上次 Enter 是否已经送达；暂停相同版本的任务，不能自动重发。
+            db.execute("UPDATE events SET status='unknown',detail='软件在发送途中退出，结果待核对；已暂停对应提醒' WHERE id IN (SELECT event_id FROM jobs WHERE status='sending')")
+            db.execute("UPDATE tasks SET status='paused' WHERE status='active' AND EXISTS (SELECT 1 FROM jobs j WHERE j.task_id=tasks.id AND j.revision=tasks.revision AND j.status='sending')")
             db.execute("UPDATE jobs SET status='unknown' WHERE status='sending'")
             cfg = {**EXTRA_DEFAULTS, **self.config(db)}
             if cfg.get('interaction_version',1)<4:
@@ -153,6 +157,8 @@ class ReminderApp(LegacyApp):
                 task['queue_status'] = job['status'] if job else ''
                 task['queue_detail'] = job['detail'] if job else ''
             result['queue_count'] = db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','waiting','retry','sending')").fetchone()[0]
+            # 异常提示不受“最近 100 条记录”限制，也不受当前清单分栏影响。
+            result['attention_tasks']=[dict(row) for row in db.execute("SELECT DISTINCT t.id,t.title FROM tasks t JOIN jobs j ON j.task_id=t.id AND j.revision=t.revision WHERE t.status='paused' AND j.status='unknown' ORDER BY t.id DESC")]
         from startup import startup_enabled
         result['startup_enabled'] = startup_enabled()
         result['data_path'] = str(self.path.resolve())
@@ -214,12 +220,17 @@ class ReminderApp(LegacyApp):
 
     def create(self, body):
         normalized, recipients, unit, amount = prepare_task(body)
-        with self.lock:
-            task_id = super().create(normalized)
-            with self.connect() as db:
-                db.execute('UPDATE tasks SET recipients=?,interval_unit=?,interval_value=?,owner_scope=?,owner_name=? WHERE id=?',
-                           (json.dumps(recipients, ensure_ascii=False), unit, amount, normalized['owner_scope'], normalized['owner_name'], task_id))
-        return task_id
+        data=validate_task(normalized)
+        # 任务正文、多人对象和负责人一次提交；中途退出也不会留下半条待办。
+        with self.lock,self.connect() as db:
+            cfg=self.config(db)
+            if data['target_type']!='local' and normalized.get('auto_start') is True:
+                cfg.update(mode='wechat',enabled=True)
+                db.execute('UPDATE settings SET value=? WHERE id=1',(json.dumps(cfg),))
+            value=now();due=next_allowed(data.get('first_due',value+timedelta(hours=data['interval_hours'])),cfg)
+            return db.execute('INSERT INTO tasks(title,group_name,member,interval_hours,next_due,created,target_type,repeat,recipients,interval_unit,interval_value,owner_scope,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                              (data['title'],data['group_name'],data['member'],data['interval_hours'],iso(due),iso(value),data['target_type'],data['repeat'],
+                               json.dumps(recipients,ensure_ascii=False),unit,amount,normalized['owner_scope'],normalized['owner_name'])).lastrowid
 
     def update(self, task_id, body):
         recipients = unit = amount = None
@@ -230,19 +241,76 @@ class ReminderApp(LegacyApp):
                 self.delete_many([task_id], restore=body['action']=='undelete')
                 return
             with self.connect() as db:
-                row = db.execute('SELECT status FROM tasks WHERE id=?',(task_id,)).fetchone()
+                row = db.execute('SELECT * FROM tasks WHERE id=?',(task_id,)).fetchone()
                 if not row or row['status']=='deleted':
                     raise ValueError('待办已删除或不存在')
-            super().update(task_id, body)
-            with self.connect() as db:
-                if recipients is not None:
-                    db.execute('UPDATE tasks SET recipients=?,interval_unit=?,interval_value=?,owner_scope=?,owner_name=? WHERE id=?',
-                               (json.dumps(recipients, ensure_ascii=False), unit, amount, body['owner_scope'], body['owner_name'], task_id))
+                action = body.get('action')
+                jobs = db.execute("SELECT * FROM jobs WHERE task_id=? AND revision=? AND status IN ('queued','waiting','retry','sending','unknown')", (task_id,row['revision'])).fetchall()
+                if action == 'undo':
+                    record = self.undo_records.get(task_id)
+                    if not record or record['revision'] != row['revision'] or time.monotonic()-record['at'] > 600:
+                        raise ValueError('这件事已经有新变化，不能撤销旧操作')
+                    if any(job['status']=='sending' for job in jobs):
+                        raise ValueError('提醒正在发送，请稍后再撤销')
+                    previous = dict(record['previous'])
+                    for jid, automatic in record['jobs']:
+                        job = db.execute('SELECT j.*,e.at AS event_at FROM jobs j JOIN events e ON e.id=j.event_id WHERE j.id=?',(jid,)).fetchone()
+                        if not job:continue
+                        if job['status']=='sending':
+                            raise ValueError('提醒正在发送，请稍后再撤销')
+                        if job['status']=='unknown':
+                            previous['status']='paused'
+                            db.execute('UPDATE jobs SET revision=? WHERE id=?',(row['revision']+1,jid))
+                        if job['status']=='done':
+                            previous['last_reminded']=job['event_at']
+                            if automatic and not row['repeat']:previous['reminder_finished']=1
+                        elif automatic and job['status']=='cancelled' and job['occurrence']<previous['next_due']:
+                            previous['next_due']=job['occurrence']
+                    db.execute('UPDATE tasks SET status=?,next_due=?,completed_at=?,reminder_finished=?,last_reminded=? WHERE id=?',
+                               (*(previous[k] for k in ('status','next_due','completed_at','reminder_finished','last_reminded')),task_id))
+                    self.undo_records.pop(task_id,None)
+                elif action == 'edit':
+                    if body.get('expected_revision') is not None and body['expected_revision']!=row['revision']:
+                        raise ValueError('待办已发生变化，请重新打开核对；草稿已保留')
+                    if any(job['status']=='sending' for job in jobs):
+                        raise ValueError('这件事的提醒正在发送，请稍后保存；输入内容会保留')
+                    data = validate_task(body)
+                    if row['target_type']=='local' and data['target_type']!='local' and body.get('auto_start') is True:
+                        cfg=self.config(db);cfg.update(mode='wechat',enabled=True)
+                        db.execute('UPDATE settings SET value=? WHERE id=1',(json.dumps(cfg),))
+                    due = data.get('first_due',parse_time(row['next_due']))
+                    # 时间控件只显示到分钟；只改文字不重设秒数或一次性提醒状态。
+                    same_schedule = (data['target_type']==row['target_type'] and recipients==json.loads(row['recipients'])
+                                     and data['group_name']==row['group_name'] and data['interval_hours']==row['interval_hours']
+                                     and data['repeat']==row['repeat'] and due.replace(second=0,microsecond=0)==parse_time(row['next_due']).replace(second=0,microsecond=0))
+                    if data['target_type']=='local' and row['target_type']=='local':same_schedule=True
+                    due_text = row['next_due'] if same_schedule else iso(next_allowed(due,self.config(db)))
+                    finished = row['reminder_finished'] if same_schedule else 0
+                    db.execute('UPDATE tasks SET title=?,group_name=?,member=?,interval_hours=?,next_due=?,target_type=?,repeat=?,reminder_finished=?,recipients=?,interval_unit=?,interval_value=?,owner_scope=?,owner_name=? WHERE id=?',
+                               (data['title'],data['group_name'],data['member'],data['interval_hours'],due_text,data['target_type'],data['repeat'],finished,
+                                json.dumps(recipients,ensure_ascii=False),unit,amount,body['owner_scope'],body['owner_name'],task_id))
+                    if same_schedule:
+                        # 已排队但未发出的同一提醒沿用原发生项，正文从最新任务读取。
+                        db.execute("UPDATE jobs SET revision=revision+1 WHERE task_id=? AND revision=? AND status IN ('queued','waiting','retry','unknown')",(task_id,row['revision']))
+                elif action in ('complete','pause','resume'):
+                    previous={k:row[k] for k in ('status','next_due','completed_at','reminder_finished','last_reminded')}
+                    if action in ('complete','pause'):
+                        self.undo_records[task_id]=dict(previous=previous,revision=row['revision']+1,at=time.monotonic(),
+                                                       jobs=[(job['id'],bool(job['automatic'])) for job in jobs])
+                        while len(self.undo_records)>128:self.undo_records.pop(next(iter(self.undo_records)))
+                    else:self.undo_records.pop(task_id,None)
+                    status={'complete':'done','pause':'paused','resume':'active'}[action]
+                    due_text=iso(next_allowed(now()+timedelta(hours=row['interval_hours']),self.config(db))) if action=='resume' else row['next_due']
+                    db.execute('UPDATE tasks SET status=?,next_due=?,completed_at=?,reminder_finished=? WHERE id=?',
+                               (status,due_text,iso(now()) if action=='complete' else None,0 if action=='resume' else row['reminder_finished'],task_id))
+                else:
+                    raise ValueError('未知待办操作')
                 db.execute('UPDATE tasks SET revision=revision+1 WHERE id=?', (task_id,))
-                jobs = db.execute("SELECT event_id FROM jobs WHERE task_id=? AND status IN ('queued','waiting','retry')", (task_id,)).fetchall()
-                db.execute("UPDATE jobs SET status='cancelled' WHERE task_id=? AND status IN ('queued','waiting','retry')", (task_id,))
-                for row in jobs:
-                    db.execute("UPDATE events SET status='cancelled',detail='待办已完成、暂停或修改，取消旧排队项' WHERE id=?", (row[0],))
+                if action!='edit' or not same_schedule:
+                    cancelled = db.execute("SELECT event_id FROM jobs WHERE task_id=? AND status IN ('queued','waiting','retry')", (task_id,)).fetchall()
+                    db.execute("UPDATE jobs SET status='cancelled' WHERE task_id=? AND status IN ('queued','waiting','retry')", (task_id,))
+                    for job in cancelled:
+                        db.execute("UPDATE events SET status='cancelled',detail='待办已完成、暂停或修改，取消旧排队项' WHERE id=?", (job[0],))
 
     def delete_many(self, task_ids, restore=False):
         if not isinstance(task_ids,list) or not task_ids or len(task_ids)>1000 or any(type(t) is not int for t in task_ids):
@@ -525,6 +593,7 @@ class ReminderApp(LegacyApp):
                                     event[6] = '恢复备份时取消旧排队记录，以当前待办重新调度'
                                 db.execute('INSERT INTO events('+','.join(event_columns)+') VALUES(?,?,?,?,?,?,?)',event)
                             db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(cfg),))
+                        self.undo_records.clear()
         except (sqlite3.Error,TypeError,KeyError,AttributeError):
             raise ValueError('无法读取备份文件') from None
         finally:
