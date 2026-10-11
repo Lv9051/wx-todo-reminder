@@ -1,6 +1,9 @@
 "use strict";
 let state=null,filter="active",scope="mine",historyStatus="done",selectMode=false,ownerEdited=false,view="tasks",editing=null,settingsDirty=false,refreshing=false,serverReceived=0;
 const selected=new Set();
+let historyData={key:null,tasks:[],months:[],total:0,has_more:false},historySequence=0,historyLoading=false,savedDraft=null;
+const reducedMotion=()=>matchMedia('(prefers-reduced-motion: reduce)').matches;
+const findTask=id=>state?.tasks.find(t=>t.id===Number(id))||historyData.tasks.find(t=>t.id===Number(id));
 const pending=new Set(), cache={}, $=s=>document.querySelector(s);
 const escapeHTML=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const formatTime=v=>v?new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(v)):"未记录";
@@ -15,29 +18,40 @@ async function request(path,data){
  const response=await fetch(path,data?{method:"POST",headers:{"Content-Type":"application/json","X-Reminder-Token":state?.token??""},body:JSON.stringify(data)}:{});
  const value=await response.json();if(!response.ok)throw new Error(value.error||"操作失败");return value;
 }
-function accept(value){state=value;serverReceived=performance.now();render()}
+function accept(value){if(state?.token===value.token&&state.snapshot_sequence>value.snapshot_sequence)return;state=value;serverReceived=performance.now();render()}
 async function mutate(path,data,success,undo){
- try{accept(await request(path,data));if(success)toast(success,false,undo);return true}
- catch(error){toast(error.message,true);return false}
+ const animations=[];
+ try{
+  const value=await request(path,data);
+  const current=state?.token!==value.token||!(state.snapshot_sequence>value.snapshot_sequence);
+  if(current&&!reducedMotion()&&(data.action==='complete'||data.action==='delete'||path==='/api/tasks/delete-many'&&!data.restore)){
+   const ids=data.task_ids||[Number(path.split('/').pop())];
+   for(const id of ids){const row=[...document.querySelectorAll(`.task-card[data-task="${id}"]`)].find(el=>el.getClientRects().length);if(row)animations.push(row.animate([{opacity:1,height:row.offsetHeight+'px',marginBottom:'0px'},{opacity:0,height:'0px',minHeight:0,paddingTop:'0px',paddingBottom:'0px',marginBottom:'-6px',overflow:'hidden'}],{duration:170,easing:'cubic-bezier(.2,.7,.2,1)',fill:'forwards'}))}
+   await Promise.all(animations.map(a=>a.finished.catch(()=>{})));
+  }
+  accept(value);if(success)toast(success,false,undo);return true;
+ }catch(error){toast(error.message,true);return false}
+ finally{animations.forEach(a=>a.cancel())}
 }
-function writeHTML(selector,key,html){if(cache[selector]===key)return;cache[selector]=key;$(selector).innerHTML=html}
+function writeHTML(selector,key,html){if(cache[selector]===key)return;cache[selector]=key;const root=$(selector),positions=new Map();if(selector==='#task-list'&&!reducedMotion())root.querySelectorAll('[data-task]').forEach(el=>positions.set(el.dataset.task,el.getBoundingClientRect().top));root.innerHTML=html;for(const el of root.querySelectorAll('[data-task]')){const top=positions.get(el.dataset.task);if(top!==undefined){const delta=top-el.getBoundingClientRect().top;if(Math.abs(delta)>1)el.animate([{transform:`translateY(${delta}px)`},{transform:'translateY(0)'}],{duration:200,easing:'cubic-bezier(.2,.7,.2,1)'})}}}
 function setView(next){
  hideMenu();hidePreview();
+ const changed=view!==next;
  view=next;document.querySelectorAll('.nav[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
  for(const v of ["tasks","history","events","settings"])$(`#${v}-view`).hidden=v!==view;
  const titles={tasks:["待办清单","记下来，一件件完成。","先记待办。需要时，再添加提醒。"],history:["历史待办","做完的事，也值得记住。","完成的事项在这里留档，想继续时随时重新开启。"],events:["提醒记录","每一次提醒，都有记录。","看看哪些已经提醒，哪些正在等待重试。"],settings:["提醒设置","按你的节奏，适时提醒。","选择提醒时段，检查桌面通知与微信连接。"]};
  $("#breadcrumb").textContent=titles[view][0];$("#page-title").textContent=titles[view][1];$("#page-description").textContent=titles[view][2];$("#new-task").hidden=view!=="tasks";
+ if(changed&&!reducedMotion())$(`#${view}-view`).animate([{opacity:.3,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:220,easing:'cubic-bezier(.2,.7,.2,1)'});
+ if(view==='history'&&state)renderHistory();
 }
 function render(){
- if(!state)return;const cfg=state.settings,active=state.tasks.filter(t=>t.status==="active"),done=state.tasks.filter(t=>t.status==="done");
- $("#active-count").textContent=active.length;$("#nav-count").textContent=active.length;$("#history-count").textContent=done.length;$("#done-count").textContent=done.length;$("#today-count").textContent=state.today_count;
- $("#active-subtitle").textContent=`${active.filter(t=>t.target_type!=="local"&&!t.reminder_finished).length} 件已安排自动提醒`;
+ if(!state)return;const cfg=state.settings;
+ $("#nav-count").textContent=state.tasks.length;$("#history-count").textContent=state.history_counts?.done??0;
  $("#engine-dot").classList.toggle("running",cfg.enabled);$("#engine-title").textContent=cfg.enabled?(cfg.mode==="preview"?"预览调度已开启":"自动提醒已开启"):"自动提醒已暂停";
  $("#engine-description").textContent=cfg.mode==="preview"?"到点只生成预览记录": "提醒自己弹桌面通知；提醒别人自动发微信";
  $("#toggle-engine").textContent=cfg.enabled?"暂停提醒":"开启提醒";$("#clock").textContent=formatTime(state.server_time)+" · 北京时间";
  $("#notification-state").textContent=state.desktop_notifications?"桌面通知已就绪；关闭页面后仍能提醒。":"请使用桌面软件或 start.bat 启动，让程序驻留托盘。";
- $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.2.0"} · 本地保存`;
- document.body.classList.toggle("compact",cfg.compact!==false);
+ $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.3.0"} · 本地保存`;
  $("#data-location").textContent=state.data_path?"数据位置："+state.data_path:"";
  $("#queue-count").textContent=state.queue_count?state.queue_count+" 条提醒排队中":"";
  for(const id of selected)if(!state.tasks.some(t=>t.id===id&&!['done','deleted'].includes(t.status)))selected.delete(id);
@@ -45,14 +59,16 @@ function render(){
  $("#attention-banner").hidden=!issues.length;$("#attention-banner").textContent=issues.length?'有 '+new Set(issues.map(e=>e.task_id)).size+' 件事项的发送状态待核对 · 查看提醒记录 →':'';
  $("#widget-state").textContent=({visible:'小窗已显示',hidden:'小窗已关闭',failed:'小窗启动失败，请重启软件或查看运行日志',unavailable:'请在桌面软件中开启小窗'})[state.widget_state]||'';
  renderTasks();renderHistory();renderEvents();
- if(!settingsDirty){const f=$("#settings-form");f.elements.mode.value=cfg.mode;for(const k of ["start","end","daily_limit"])f.elements[k].value=cfg[k];f.elements.weekdays.checked=cfg.weekdays;for(const k of ["compact","sound_enabled","widget_enabled"])f.elements[k].checked=k==="widget_enabled"?Boolean(cfg[k]):cfg[k]!==false;f.elements.startup_enabled.checked=Boolean(state.startup_enabled)}
+ if(!settingsDirty){const f=$("#settings-form");f.elements.mode.value=cfg.mode;for(const k of ["start","end","daily_limit"])f.elements[k].value=cfg[k];f.elements.weekdays.checked=cfg.weekdays;for(const k of ["sound_enabled","widget_enabled"])f.elements[k].checked=k==="widget_enabled"?Boolean(cfg[k]):cfg[k]!==false;f.elements.startup_enabled.checked=Boolean(state.startup_enabled)}
+ if($('#task-dialog').open)updateConflict();
 }
 function card(t,history=false){
  const local=t.target_type==="local",self=t.target_type==="self",busy=pending.has(t.id);
- const target=local?'<span class="chip">仅记录</span>':self?'<span class="chip">提醒自己</span>':t.target_type==="contact"?`<span class="chip">私聊</span><span>♧ ${escapeHTML((t.recipients||[t.group_name]).join("、"))}</span>`:`<span class="chip">@ ${escapeHTML((t.recipients||[t.member]).join("、"))}</span><span>▤ ${escapeHTML(t.group_name)}</span>`;
+ const target=local?'':self?'<span class="chip">提醒自己</span>':t.target_type==="contact"?`<span class="chip">私聊</span><span>♧ ${escapeHTML((t.recipients||[t.group_name]).join("、"))}</span>`:`<span class="chip">@ ${escapeHTML((t.recipients||[t.member]).join("、"))}</span><span>▤ ${escapeHTML(t.group_name)}</span>`;
  const cadence=local?"":t.repeat?`<span>◷ 每 ${escapeHTML(t.interval_value??t.interval_hours)} ${{hours:"小时",days:"天",weeks:"周"}[t.interval_unit||"hours"]}</span>`:'<span>◷ 提醒一次</span>';
  const deleted=t.status==='deleted';
- const timing=deleted?'删除于 '+formatTime(t.deleted_at):history?(t.completed_at?"完成于 "+formatTime(t.completed_at):"已完成，停止提醒"):t.status==="paused"?"提醒已暂停":local?"仅记录，不提醒":t.queue_status?({queued:"等待发送",waiting:"等待允许时段",retry:"等待重试",sending:"发送中"}[t.queue_status]+" · "+t.queue_detail):t.reminder_finished?"已提醒，等待完成":"下次提醒 "+formatTime(t.next_due)+(state.settings.enabled?"":" · 全部提醒已暂停");
+ const days=t.purge_after?Math.max(0,Math.ceil((new Date(t.purge_after)-serverNow())/86400000)):30;
+ const timing=deleted?'删除于 '+formatTime(t.deleted_at)+' · '+(days?'保留 '+days+' 天':'即将清理'):history?(t.completed_at?"完成于 "+formatTime(t.completed_at):"已完成，停止提醒"):t.status==="paused"?(local?'':'提醒已暂停'):local?'':t.queue_status?({queued:"等待发送",waiting:"等待允许时段",retry:"等待重试",sending:"发送中"}[t.queue_status]+" · "+t.queue_detail):t.reminder_finished?"已提醒，等待完成":"下次提醒 "+formatTime(t.next_due)+(state.settings.enabled?"":" · 全部提醒已暂停");
  const action=(name,label,cls="")=>`<button class="${cls}" data-action="${name}" data-id="${t.id}" ${busy?"disabled":""}>${label}</button>`;
  let actions=deleted?action('undelete','恢复'):history?action("resume","重新开启"):action("complete","✓ 完成","done-button")+(t.status==='active'?(local?action("add-reminder","添加提醒"):action("remind",busy?"处理中…":state.settings.mode==="preview"?"预览一次":"额外提醒")):action('resume','恢复提醒'));
  if(!deleted)actions+=action('more','⋯','more-button');
@@ -72,10 +88,26 @@ function renderTasks(){
  document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('selected',b.dataset.scope===scope));
 }
 function visibleTasks(){const q=$("#search").value.trim().toLowerCase();return state.tasks.filter(t=>!['done','deleted'].includes(t.status)&&(scope==='all'||t.owner_scope===scope)&&(filter==='all'||filter==='reminders'&&t.target_type!=='local'||t.status===filter)&&[t.title,t.owner_name,t.member,t.group_name,...(t.recipients||[])].some(v=>(v||'').toLowerCase().includes(q)))}
+function historyKey(){return JSON.stringify([historyStatus,$('#history-month').value,$('#history-search').value.trim(),state.history_revision])}
+async function loadHistory(more=false){
+ const key=historyKey(),seq=++historySequence,button=$('#history-more');historyLoading=true;button.disabled=true;
+ if(!more){historyData={key,tasks:[],months:[],total:0,has_more:false};writeHTML('#history-list','loading'+key,'<div class="history-loading" aria-label="正在读取历史"><i></i><i></i><i></i></div>');button.hidden=true}
+ const query=new URLSearchParams({status:historyStatus,month:$('#history-month').value,search:$('#history-search').value.trim(),offset:String(more?historyData.tasks.length:0)});
+ try{const data=await request('/api/history?'+query);if(seq!==historySequence||key!==historyKey())return;historyData={...data,key,tasks:more?[...historyData.tasks,...data.tasks]:data.tasks};const month=$('#history-month'),selectedMonth=month.value;month.innerHTML='<option value="">全部月份</option>'+data.months.map(m=>`<option value="${escapeHTML(m)}">${escapeHTML(m.replace('-',' 年 '))} 月</option>`).join('');if(selectedMonth&&!data.months.includes(selectedMonth))month.insertAdjacentHTML('beforeend',`<option value="${escapeHTML(selectedMonth)}">${escapeHTML(selectedMonth.replace('-',' 年 '))} 月</option>`);month.value=selectedMonth;paintHistory()}
+ catch(error){if(seq===historySequence){historyData.key=null;writeHTML('#history-list','error'+seq,empty('暂时没能读取历史','重新打开历史页即可重试。'));toast(error.message,true)}}finally{if(seq===historySequence){historyLoading=false;button.disabled=false}}
+}
 function renderHistory(){
- const q=$("#history-search").value.trim().toLowerCase();const tasks=state.tasks.filter(t=>t.status===historyStatus&&[t.title,t.owner_name,t.member,t.group_name,...(t.recipients||[])].some(v=>(v||"").toLowerCase().includes(q))).sort((a,b)=>String(b.deleted_at||b.completed_at||b.created).localeCompare(String(a.deleted_at||a.completed_at||a.created)));
- writeHTML("#history-list",JSON.stringify([tasks,q,[...pending]]),tasks.length?tasks.map(t=>card(t,true)).join(""):empty(historyStatus==='deleted'?"回收站是空的":"这里保存你做完的事",historyStatus==='deleted'?"删除的事项可以恢复，有提醒的事项恢复后先暂停。":"标记完成后，会自动归入历史，不再打扰你。"));
+ if(view!=='history')return;
+ if(historyData.key!==historyKey())loadHistory();else if(!historyLoading)paintHistory();
  document.querySelectorAll('[data-history]').forEach(b=>b.classList.toggle('selected',b.dataset.history===historyStatus));
+ $('#history-note').textContent=historyStatus==='deleted'?'删除后保留 30 天，到期自动清理；清理前会备份。':'完成记录长期保留，按完成日期整理。';
+}
+function paintHistory(){
+ const today=bjParts(serverNow()).slice(0,10),yesterday=bjParts(new Date(serverNow().getTime()-86400000)).slice(0,10),groups=new Map();
+ for(const t of historyData.tasks){const day=(t.history_stamp||'').slice(0,10)||'未记录日期';if(!groups.has(day))groups.set(day,[]);groups.get(day).push(t)}
+ const html=[...groups].map(([day,tasks])=>`<section class="history-group"><h3>${escapeHTML(day===today?'今天':day===yesterday?'昨天':day.replace(/-/g,'.'))}</h3><div class="task-list">${tasks.map(t=>card(t,true)).join('')}</div></section>`).join('');
+ writeHTML('#history-list',JSON.stringify([historyData.tasks,[...pending],historyStatus]),html||empty(historyStatus==='deleted'?'回收站是空的':'没有完成记录',historyStatus==='deleted'?'删除的事项可在 30 天内恢复。':'试试其他月份或关键词；完成的事项会自动归入这里。'));
+ $('#history-more').hidden=!historyData.has_more;$('#history-more').textContent=`查看更多 · 已显示 ${historyData.tasks.length} / ${historyData.total}`;
 }
 function renderEvents(){
  const statuses={queued:"已排队",waiting:"等待空闲 / 时段",cancelled:"已取消",preview:"预览 · 未发送",notified:"已提交桌面通知",operated:"微信已执行发送",sending:"正在处理",retry:"等待自动重试",unknown:"状态待核对 · 已暂停"};
@@ -86,6 +118,7 @@ function setDue(date){
 }
 function updateScheduleSummary(){
  const f=$("#task-form");$("#schedule-summary").textContent=f.elements.first_due.value?"首次提醒："+formatTime(f.elements.first_due.value+":00+08:00")+" · 北京时间":"请选择提醒时间";
+ updateConflict();
 }
 function updateTargetFields(){
  const f=$("#task-form"),type=f.elements.reminder_enabled.checked?f.elements.target_type.value:"local",local=type==="local",wx=type==="group"||type==="contact";
@@ -97,9 +130,23 @@ function updateTargetFields(){
  $("#target-hint").textContent={local:"只保存到清单，不发送任何提醒。",self:"到点弹出 Windows 通知，不需要打开微信。",contact:"自动搜索联系人并私聊，无需置顶。",group:"每行填写一个成员名称。同群到期事项会汇总，发出真正的 @。"}[type];
  $("#save-hint").textContent=wx?"保存后按计划自动发微信。微信需登录，电脑桌面需解锁；可随时暂停。":"关闭页面后仍可通知你，请让软件在托盘保持运行。";
  $("#repeat-fields").hidden=!f.elements.repeat.checked;
+ updateConflict();
 }
+function updateConflict(){
+ const f=$('#task-form'),el=$('#schedule-conflict');if(!state||!f.elements.reminder_enabled.checked||!['group','contact'].includes(f.elements.target_type.value)||!f.elements.first_due.value){el.hidden=true;return}
+ const kind=f.elements.target_type.value,minute=f.elements.first_due.value,names=(kind==='group'?f.elements.member.value:f.elements.group_name.value).split(/\r?\n/).map(n=>n.trim()).filter(Boolean),group=f.elements.group_name.value.trim();
+ const matches=state.tasks.filter(t=>t.id!==editing&&t.status==='active'&&!t.reminder_finished&&t.target_type===kind&&(kind!=='group'||t.group_name===group)&&bjParts(new Date(t.next_due)).slice(0,16)===minute&&(t.recipients||[]).some(n=>names.includes(n)));
+ el.hidden=!matches.length;if(!matches.length)return;
+ const content='<p>这个时间已安排提醒，可继续单独保存，到点同会话会汇总发送。</p>'+matches.slice(0,3).map(t=>`<button type="button" class="conflict-item" data-existing="${t.id}"><span>${escapeHTML((t.recipients||[]).filter(n=>names.includes(n)).join('、'))} · ${escapeHTML(t.title)}</span><small>查看已有待办 ↗</small></button>`).join('');
+ if(el.innerHTML!==content)el.innerHTML=content;
+}
+function captureDraft(){const f=$('#task-form');return {editing,ownerEdited,fields:[...f.elements].filter(el=>el.name).map(el=>({name:el.name,value:el.value,checked:el.checked}))}}
+function restoreDraft(){if(!savedDraft)return;const draft=savedDraft;savedDraft=null;openTask(null,{keepDraft:true});editing=draft.editing;ownerEdited=draft.ownerEdited;const f=$('#task-form');for(const field of draft.fields){const el=f.elements[field.name];el.value=field.value;if(['checkbox','radio'].includes(el.type))el.checked=field.checked}$('#dialog-title').textContent=editing?'编辑待办':'新建待办';$('#draft-return').hidden=true;updateOwner();updateTargetFields();updateInterval();updateScheduleSummary();f.elements.title.focus()}
+$('#schedule-conflict').onclick=e=>{const b=e.target.closest('[data-existing]');if(!b)return;const task=findTask(b.dataset.existing);if(!task)return;if(!savedDraft)savedDraft=captureDraft();openTask(task,{keepDraft:true});$('#draft-return').hidden=false};
+$('#back-to-draft').onclick=restoreDraft;
 function openTask(task=null,options={}){
  hideMenu();hidePreview();
+ if(!options.keepDraft)savedDraft=null;$('#draft-return').hidden=!savedDraft;
  editing=task?.id??null;const f=$("#task-form");f.reset();$("#dialog-title").textContent=task?"编辑待办":"新建待办";
  if(task)for(const k of ["title","group_name","member","interval_hours"])f.elements[k].value=task[k];
  if(task?.recipients?.length)f.elements[task.target_type==="group"?"member":"group_name"].value=task.recipients.join("\n");
@@ -107,7 +154,7 @@ function openTask(task=null,options={}){
  f.elements.reminder_enabled.checked=Boolean(options.reminder||(task&&task.target_type!=="local"));if(options.title)f.elements.title.value=options.title;
  f.elements.target_type.value=task?.target_type==="local"?"self":task?.target_type??"self";f.elements.repeat.checked=task?Boolean(task.repeat):false;
  f.elements.owner_scope.value=task?.owner_scope??(scope==='delegated'?'delegated':'mine');f.elements.owner_name.value=task?.owner_name??'';ownerEdited=!!task||scope==='delegated';updateOwner();
- setDue(task&&task.target_type!=="local"?new Date(task.next_due):serverNow());updateTargetFields();updateInterval();$("#task-dialog").showModal();f.elements.title.focus();
+ setDue(task&&task.target_type!=="local"?new Date(task.next_due):serverNow());updateTargetFields();updateInterval();if(!$('#task-dialog').open)$("#task-dialog").showModal();f.elements.title.focus();
 }
 $("#new-task").onclick=()=>openTask();for(const id of ["#close-dialog","#cancel-dialog"])$(id).onclick=()=>$("#task-dialog").close();
 $("#task-dialog").addEventListener('click',e=>{if(e.target===$("#task-dialog")){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close()}});
@@ -120,16 +167,18 @@ function updateOwner(){$('#owner-field').hidden=$('#task-form').elements.owner_s
 $('#task-form').elements.owner_scope.onchange=()=>{ownerEdited=true;updateOwner()};
 $("#task-form").elements.interval_unit.onchange=updateInterval;
 $("#task-form").elements.first_due.oninput=updateScheduleSummary;
+ for(const name of ['group_name','member'])$('#task-form').elements[name].oninput=updateConflict;
+ $('#task-dialog').addEventListener('close',()=>{savedDraft=null;$('#draft-return').hidden=true});
 $("#task-form").onsubmit=async e=>{
  e.preventDefault();const f=e.target,button=f.querySelector('[type=submit]');if(button.disabled)return;button.disabled=true;button.textContent="保存中…";
  const data=Object.fromEntries(new FormData(f));data.target_type=f.elements.reminder_enabled.checked?f.elements.target_type.value:"local";delete data.reminder_enabled;if(data.first_due)data.first_due+=":00+08:00";data.interval_value=Number(data.interval_hours||3);delete data.interval_hours;data.recipients=(data.target_type==="group"?f.elements.member.value:data.target_type==="contact"?f.elements.group_name.value:"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);data.repeat=f.elements.repeat.checked;data.auto_start=data.target_type!=="local"&&f.elements.auto_start.checked;if(editing)data.action="edit";
- try{if(await mutate(editing?`/api/tasks/${editing}`:"/api/tasks",data,data.target_type==="local"?"待办已保存":"计划已保存，到点自动提醒")){$("#task-dialog").close();filter="active";scope=data.owner_scope;$('#status-filter').value=filter;setView("tasks");renderTasks()}}
+ try{if(await mutate(editing?`/api/tasks/${editing}`:"/api/tasks",data,data.target_type==="local"?"待办已保存":"计划已保存，到点自动提醒")){if(savedDraft){restoreDraft();toast('已有事项已保存，回到保留的草稿')}else{$("#task-dialog").close();filter="active";scope=data.owner_scope;$('#status-filter').value=filter;setView("tasks");renderTasks()}}}
  finally{button.disabled=false;button.textContent="保存待办"}
 };
 $("#task-form").addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter'){e.preventDefault();e.target.form.requestSubmit()}});
 async function taskAction(e){
  const b=e.target.closest('button[data-action]');if(!b||!state)return;const action=b.dataset.action;if(action==='new')return openTask();
- const task=state.tasks.find(t=>t.id===Number(b.dataset.id));if(!task||pending.has(task.id))return;if(action==='more')return taskMenu(task,b);hideMenu();if(action==='edit')return openTask(task);if(action==='add-reminder')return openTask(task,{reminder:true});if(action==='preview')return showPreview(b,task);
+ const task=findTask(b.dataset.id);if(!task||pending.has(task.id))return;if(action==='more')return taskMenu(task,b);hideMenu();if(action==='edit')return openTask(task);if(action==='add-reminder')return openTask(task,{reminder:true});if(action==='preview')return showPreview(b,task);
  pending.add(task.id);renderTasks();renderHistory();
  try{
   if(action==='check'){toast('正在检查微信会话…');const result=await request(`/api/tasks/${task.id}`,{action});toast(result.detail);return}
@@ -142,10 +191,10 @@ async function taskAction(e){
  }catch(error){toast(error.message,true)}finally{pending.delete(task.id);renderTasks();renderHistory()}
 }
 $("#task-list").onclick=taskAction;$("#history-list").onclick=taskAction;
-for(const b of document.querySelectorAll('[data-scope]'))b.onclick=()=>{scope=b.dataset.scope;selected.clear();hidePreview();hideMenu();renderTasks()};$('#status-filter').onchange=e=>{filter=e.target.value;selected.clear();renderTasks()};for(const b of document.querySelectorAll('[data-history]'))b.onclick=()=>{historyStatus=b.dataset.history;renderHistory()};$("#search").oninput=()=>state&&renderTasks();$("#history-search").oninput=()=>state&&renderHistory();
+for(const b of document.querySelectorAll('[data-scope]'))b.onclick=()=>{scope=b.dataset.scope;selected.clear();hidePreview();hideMenu();renderTasks()};$('#status-filter').onchange=e=>{filter=e.target.value;selected.clear();renderTasks()};for(const b of document.querySelectorAll('[data-history]'))b.onclick=()=>{historyStatus=b.dataset.history;$('#history-month').value='';renderHistory()};$("#search").oninput=()=>state&&renderTasks();let historySearchTimer;$("#history-search").oninput=()=>{clearTimeout(historySearchTimer);historySearchTimer=setTimeout(()=>state&&renderHistory(),180)};$('#history-month').onchange=renderHistory;$('#history-more').onclick=()=>!historyLoading&&loadHistory(true);
 for(const b of document.querySelectorAll('[data-view]'))b.onclick=()=>setView(b.dataset.view);
 $("#toggle-engine").onclick=async e=>{const b=e.currentTarget;b.disabled=true;try{const enabled=!state.settings.enabled;await mutate('/api/settings',{enabled},enabled?'自动提醒已开启':'全部提醒已暂停')}finally{b.disabled=false}};
-$("#settings-form").oninput=()=>settingsDirty=true;$("#settings-form").onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('[type=submit]');b.disabled=true;try{if(await mutate('/api/settings',{mode:f.elements.mode.value,start:f.elements.start.value,end:f.elements.end.value,daily_limit:Number(f.elements.daily_limit.value),weekdays:f.elements.weekdays.checked,wait_idle:false,compact:f.elements.compact.checked,sound_enabled:f.elements.sound_enabled.checked,widget_enabled:f.elements.widget_enabled.checked,...(f.elements.startup_enabled.checked!==Boolean(state.startup_enabled)?{startup_enabled:f.elements.startup_enabled.checked}:{})},'设置已保存')){settingsDirty=false;render()}}finally{b.disabled=false}};
+$("#settings-form").oninput=()=>settingsDirty=true;$("#settings-form").onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('[type=submit]');b.disabled=true;try{if(await mutate('/api/settings',{mode:f.elements.mode.value,start:f.elements.start.value,end:f.elements.end.value,daily_limit:Number(f.elements.daily_limit.value),weekdays:f.elements.weekdays.checked,wait_idle:false,compact:true,sound_enabled:f.elements.sound_enabled.checked,widget_enabled:f.elements.widget_enabled.checked,...(f.elements.startup_enabled.checked!==Boolean(state.startup_enabled)?{startup_enabled:f.elements.startup_enabled.checked}:{})},'设置已保存')){settingsDirty=false;render()}}finally{b.disabled=false}};
 $('#settings-form').elements.widget_enabled.onchange=async e=>{const desired=e.target.checked;if(!await mutate('/api/settings',{widget_enabled:desired},desired?'桌面小窗已开启':'桌面小窗已关闭'))e.target.checked=!desired};
 $('#reset-widget').onclick=()=>mutate('/api/widget/reset',{},'小窗已显示到屏幕中央');
 $('#attention-banner').onclick=()=>setView('events');
@@ -177,6 +226,6 @@ document.addEventListener('pointerdown',e=>{if(!e.target.closest('#action-menu')
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){const anchor=menuAnchor;hideMenu();hidePreview();anchor?.focus()}if(!$('#action-menu').hidden&&['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();const items=[...$('#action-menu').querySelectorAll('button')],i=items.indexOf(document.activeElement);items[(i+(e.key==='ArrowDown'?1:items.length-1))%items.length].focus()}});
 function hidePreview(){clearTimeout(previewTimer);previewTimer=null;$('#task-preview').hidden=true}
 function showPreview(anchor,task){previewAnchor=anchor;const p=$('#task-preview');$('#preview-title').textContent=task.title;$('#preview-meta').textContent=(task.owner_name||(task.owner_scope==='mine'?'我的待办':(task.recipients||[]).join('、')||'交办事项'))+(task.target_type==='local'?' · 仅记录':' · '+(task.status==='paused'?'提醒已暂停':'下次提醒 '+formatTime(task.next_due)));placePopup(p,anchor)}
-function schedulePreview(b){if(!state)return;previewAnchor=b;const t=state.tasks.find(t=>t.id===Number(b.dataset.id));previewTimer=setTimeout(()=>{previewTimer=null;if(b.isConnected&&b.matches(':hover')&&t)showPreview(b,t)},400)}
-for(const list of ['#task-list','#history-list']){const el=$(list);el.addEventListener('pointerover',e=>{const b=e.target.closest('.task-title');if(!b||b.contains(e.relatedTarget)||!state)return;hidePreview();schedulePreview(b)});el.addEventListener('pointermove',e=>{const b=e.target.closest('.task-title');if(b&&!previewTimer&&$('#task-preview').hidden)schedulePreview(b)});el.addEventListener('pointerout',e=>{if(e.target.closest('.task-title')){hidePreview();previewAnchor=null}});el.addEventListener('focusin',e=>{const b=e.target.closest('.task-title');if(b&&state){const t=state.tasks.find(t=>t.id===Number(b.dataset.id));if(t)showPreview(b,t)}});el.addEventListener('focusout',()=>{hidePreview();previewAnchor=null})}
+function schedulePreview(b){if(!state)return;previewAnchor=b;const t=findTask(b.dataset.id);previewTimer=setTimeout(()=>{previewTimer=null;if(b.isConnected&&b.matches(':hover')&&t)showPreview(b,t)},400)}
+for(const list of ['#task-list','#history-list']){const el=$(list);el.addEventListener('pointerover',e=>{const b=e.target.closest('.task-title');if(!b||b.contains(e.relatedTarget)||!state)return;hidePreview();schedulePreview(b)});el.addEventListener('pointermove',e=>{const b=e.target.closest('.task-title');if(b&&!previewTimer&&$('#task-preview').hidden)schedulePreview(b)});el.addEventListener('pointerout',e=>{if(e.target.closest('.task-title')){hidePreview();previewAnchor=null}});el.addEventListener('focusin',e=>{const b=e.target.closest('.task-title');if(b&&state){const t=findTask(b.dataset.id);if(t)showPreview(b,t)}});el.addEventListener('focusout',()=>{hidePreview();previewAnchor=null})}
 window.addEventListener('scroll',()=>{const b=previewAnchor;hidePreview();hideMenu();if(b?.isConnected&&b.matches(':hover'))schedulePreview(b)},true);

@@ -194,14 +194,14 @@ def _send_via_uia(body, driver=None, phase=None):
             guard()
             old_clipboard = driver._clip_get()
             try:
-                driver._clip_set(' ' + text)
+                driver._clip_set('\n' + text)
                 edit.SetFocus()
                 edit.SendKeys('{End}{Ctrl}v', waitTime=.1)
                 time.sleep(.3)
             finally:
                 if not body.get('_input_changed',lambda:False)():
                     driver._clip_set(old_clipboard)
-            owned = token + ' ' + text
+            owned = token + '\n' + text
         else:
             if not driver._set_text(edit, text):
                 raise RuntimeError('无法写入微信输入框')

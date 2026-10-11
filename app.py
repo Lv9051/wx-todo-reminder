@@ -203,10 +203,10 @@ class ReminderApp:
     def config(self, db):
         return json.loads(db.execute("SELECT value FROM settings WHERE id=1").fetchone()[0])
 
-    def snapshot(self):
+    def snapshot(self, include_history=True):
         with self.lock, self.connect() as db:
             return dict(settings=self.config(db),
-                        tasks=[dict(row) for row in db.execute("SELECT * FROM tasks ORDER BY id DESC")],
+                        tasks=[dict(row) for row in db.execute("SELECT * FROM tasks " + ("" if include_history else "WHERE status NOT IN ('done','deleted') ") + "ORDER BY id DESC")],
                         events=[dict(row) for row in db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")],
                         today_count=db.execute("SELECT count(*) FROM events WHERE substr(at,1,10)=? "
                                                "AND status IN ('preview','operated','notified')", (now().date().isoformat(),)).fetchone()[0],
@@ -417,7 +417,15 @@ def serve(app, port):
                 return self.respond({"error": "只允许本机访问"}, 403)
             path = urlsplit(self.path).path
             if path == "/api/state":
-                return self.respond(app.snapshot())
+                return self.respond(app.snapshot(include_history=False))
+            if path == '/api/history':
+                from urllib.parse import parse_qs
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    return self.respond(app.history(status=query.get('status',['done'])[0], month=query.get('month',[''])[0],
+                                                    search=query.get('search',[''])[0], offset=int(query.get('offset',['0'])[0])))
+                except (ValueError, TypeError) as exc:
+                    return self.respond({'error':str(exc)},400)
             if path == '/api/backup':
                 return self.respond(app.backup().read_bytes(), content_type='application/octet-stream')
             if path == "/api/diagnostic":
@@ -450,7 +458,7 @@ def serve(app, port):
                     app.create(body)
                 elif path == '/api/remind-all':
                     count = app.enqueue(body.get('task_ids'))
-                    return self.respond({**app.snapshot(), 'queued_added': count})
+                    return self.respond({**app.snapshot(include_history=False), 'queued_added': count})
                 elif path == '/api/data/restore':
                     app.restore(body.get('content', ''))
                 elif path == '/api/tasks/delete-many':
@@ -477,7 +485,7 @@ def serve(app, port):
                         app.update(task_id, body)
                 else:
                     return self.respond({"error": "接口不存在"}, 404)
-                self.respond(app.snapshot())
+                self.respond(app.snapshot(include_history=False))
             except (ValueError, KeyError, TypeError) as exc:
                 self.respond({"error": str(exc)}, 400)
             except Exception:

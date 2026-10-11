@@ -2,9 +2,11 @@
 import base64
 import json
 import math
+import re
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import closing
 from datetime import timedelta
@@ -13,6 +15,7 @@ from app import ReminderApp as LegacyApp, DEFAULTS, RetryableSendError, transpor
 
 EXTRA_DEFAULTS = dict(wait_idle=False, idle_seconds=1, sound_enabled=True, compact=True,widget_enabled=False,widget_position=None,widget_scope='mine')
 PENDING = ('queued', 'waiting', 'retry', 'sending')
+TRASH_DAYS = 30
 
 
 def validate_config(cfg):
@@ -90,20 +93,25 @@ class ReminderApp(LegacyApp):
             idle_probe = waiting_reason
         self.idle_probe = idle_probe
         self.wx_thread = None
+        self.snapshot_sequence = 0
+        self.last_cleanup = float('-inf')
         with self.connect() as db:
-            needs_backup = 'deleted_at' not in {r[1] for r in db.execute('PRAGMA table_info(tasks)')} and db.execute('SELECT count(*) FROM tasks').fetchone()[0]>0
+            needs_backup = 'purge_after' not in {r[1] for r in db.execute('PRAGMA table_info(tasks)')} and db.execute('SELECT count(*) FROM tasks').fetchone()[0]>0
         if needs_backup:
             self.backup()
         with self.lock, self.connect() as db:
             columns = {r[1] for r in db.execute('PRAGMA table_info(tasks)')}
             for name, spec in (('recipients', "TEXT NOT NULL DEFAULT '[]'"), ('revision', 'INTEGER NOT NULL DEFAULT 1'),
                                ('interval_unit', "TEXT NOT NULL DEFAULT 'hours'"), ('interval_value', 'REAL'),
-                               ('deleted_at','TEXT'),('deleted_status','TEXT'),('owner_scope','TEXT'),
+                               ('deleted_at','TEXT'),('deleted_status','TEXT'),('purge_after','TEXT'),('owner_scope','TEXT'),
                                ('owner_name',"TEXT NOT NULL DEFAULT ''")):
                 if name not in columns:
                     db.execute(f'ALTER TABLE tasks ADD COLUMN {name} {spec}')
             db.execute('UPDATE tasks SET interval_value=interval_hours WHERE interval_value IS NULL')
             db.execute("UPDATE tasks SET owner_scope=CASE WHEN target_type IN ('group','contact') THEN 'delegated' ELSE 'mine' END WHERE owner_scope IS NULL")
+            # 旧回收站从升级日起获得完整保留期，而不是按旧删除时间立即清除。
+            db.execute("UPDATE tasks SET purge_after=? WHERE status='deleted' AND purge_after IS NULL", (iso(now()+timedelta(days=TRASH_DAYS)),))
+            db.execute('CREATE INDEX IF NOT EXISTS tasks_history ON tasks(status,completed_at,deleted_at)')
             for row in db.execute("SELECT * FROM tasks WHERE recipients='[]' AND target_type IN ('contact','group')").fetchall():
                 recipients = [row['member'] if row['target_type'] == 'group' else row['group_name']]
                 db.execute('UPDATE tasks SET recipients=? WHERE id=?', (json.dumps(recipients, ensure_ascii=False), row['id']))
@@ -118,20 +126,32 @@ class ReminderApp(LegacyApp):
             ''')
             db.execute("UPDATE jobs SET status='unknown' WHERE status='sending'")
             cfg = {**EXTRA_DEFAULTS, **self.config(db)}
-            if cfg.get('interaction_version',1)<3:
-                cfg.update(wait_idle=False, interaction_version=3)
+            if cfg.get('interaction_version',1)<4:
+                cfg.update(wait_idle=False, compact=True, interaction_version=4)
             db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(cfg),))
 
-    def snapshot(self):
-        result = super().snapshot()
+    def snapshot(self, include_history=True):
+        # 同一快照的清单和队列一致；响应序号让界面忽略较晚抵达的旧响应。
+        with self.lock:
+            result = self._snapshot(include_history)
+            self.snapshot_sequence += 1
+            result['snapshot_sequence'] = self.snapshot_sequence
+            return result
+
+    def _snapshot(self, include_history):
+        result = super().snapshot(include_history=include_history)
         with self.lock, self.connect() as db:
+            counts = db.execute("SELECT sum(status='done'),sum(status='deleted'),coalesce(sum(CASE WHEN status IN ('done','deleted') THEN revision ELSE 0 END),0) FROM tasks").fetchone()
+            result['history_counts'] = dict(done=counts[0] or 0, deleted=counts[1] or 0)
+            result['history_revision'] = ':'.join(str(n or 0) for n in counts)
+            jobs_by_task={}
+            for job in db.execute("SELECT j.task_id,j.revision,j.status,e.detail FROM jobs j JOIN events e ON e.id=j.event_id WHERE j.status IN ('queued','waiting','retry','sending') ORDER BY j.id"):
+                jobs_by_task.setdefault((job['task_id'],job['revision']),job)
             for task in result['tasks']:
                 task['recipients'] = json.loads(task['recipients'])
-                jobs = db.execute("SELECT j.status,e.detail FROM jobs j JOIN events e ON e.id=j.event_id "
-                                  "WHERE j.task_id=? AND j.revision=? AND j.status IN ('queued','waiting','retry','sending') ORDER BY j.id",
-                                  (task['id'], task['revision'])).fetchall()
-                task['queue_status'] = jobs[0]['status'] if jobs else ''
-                task['queue_detail'] = jobs[0]['detail'] if jobs else ''
+                job = jobs_by_task.get((task['id'],task['revision']))
+                task['queue_status'] = job['status'] if job else ''
+                task['queue_detail'] = job['detail'] if job else ''
             result['queue_count'] = db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','waiting','retry','sending')").fetchone()[0]
         from startup import startup_enabled
         result['startup_enabled'] = startup_enabled()
@@ -139,6 +159,42 @@ class ReminderApp(LegacyApp):
         widget = getattr(self, 'widget', None)
         result['widget_state'] = ('failed' if widget.error else 'visible' if widget.visible else 'hidden') if widget else 'unavailable'
         return result
+
+    def history(self, status='done', month='', search='', offset=0, limit=40):
+        if status not in ('done','deleted') or (month and not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',month)):
+            raise ValueError('历史筛选无效')
+        if not isinstance(search,str) or len(search)>500 or type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=100:
+            raise ValueError('历史查询无效')
+        stamp = "datetime(coalesce(" + ('deleted_at' if status=='deleted' else 'completed_at') + ",created),'+8 hours')"
+        clauses, params = ['status=?'], [status]
+        if month:
+            clauses.append('substr('+stamp+',1,7)=?');params.append(month)
+        if search.strip():
+            clauses.append("instr(lower(title||' '||coalesce(owner_name,'')||' '||group_name||' '||member||' '||recipients),?)>0")
+            params.append(search.strip().lower())
+        where=' AND '.join(clauses)
+        with self.lock,self.connect() as db:
+            total=db.execute('SELECT count(*) FROM tasks WHERE '+where,params).fetchone()[0]
+            rows=db.execute('SELECT *,'+stamp+' AS history_stamp FROM tasks WHERE '+where+' ORDER BY history_stamp DESC,id DESC LIMIT ? OFFSET ?',(*params,limit,offset)).fetchall()
+            tasks=[dict(row) for row in rows]
+            for task in tasks:task['recipients']=json.loads(task['recipients'])
+            months=[r[0] for r in db.execute('SELECT DISTINCT substr('+stamp+',1,7) AS month FROM tasks WHERE status=? ORDER BY month DESC',(status,)) if r[0]]
+        return dict(tasks=tasks,months=months,total=total,has_more=offset+len(tasks)<total,trash_days=TRASH_DAYS)
+
+    def purge_trash(self, at=None):
+        value=at or now()
+        # 与恢复/删除串行；备份成功之后才清理已经到期的回收站项。
+        with self.lock:
+            with self.connect() as db:
+                ids=[r[0] for r in db.execute("SELECT id FROM tasks WHERE status='deleted' AND purge_after IS NOT NULL AND julianday(purge_after)<=julianday(?)",(iso(value),))]
+            if not ids:return 0
+            self.backup()
+            with self.connect() as db:
+                for tid in ids:
+                    db.execute('DELETE FROM jobs WHERE task_id=?',(tid,))
+                    db.execute('DELETE FROM events WHERE task_id=?',(tid,))
+                    db.execute("DELETE FROM tasks WHERE id=? AND status='deleted'",(tid,))
+        return len(ids)
 
     def save_settings(self, body):
         with self.lock, self.connect() as db:
@@ -200,10 +256,11 @@ class ReminderApp(LegacyApp):
                 if restore:
                     if row['status']!='deleted':continue
                     status='done' if row['deleted_status']=='done' else 'active' if row['target_type']=='local' else 'paused'
-                    db.execute('UPDATE tasks SET status=?,deleted_at=NULL,deleted_status=NULL,revision=revision+1 WHERE id=?',(status,tid))
+                    db.execute('UPDATE tasks SET status=?,deleted_at=NULL,deleted_status=NULL,purge_after=NULL,revision=revision+1 WHERE id=?',(status,tid))
                 else:
                     if row['status']=='deleted':continue
-                    db.execute("UPDATE tasks SET deleted_status=status,status='deleted',deleted_at=?,revision=revision+1 WHERE id=?",(iso(now()),tid))
+                    deleted=now()
+                    db.execute("UPDATE tasks SET deleted_status=status,status='deleted',deleted_at=?,purge_after=?,revision=revision+1 WHERE id=?",(iso(deleted),iso(deleted+timedelta(days=TRASH_DAYS)),tid))
                     jobs=db.execute("SELECT event_id FROM jobs WHERE task_id=? AND status IN ('queued','waiting','retry')",(tid,)).fetchall()
                     db.execute("UPDATE jobs SET status='cancelled' WHERE task_id=? AND status IN ('queued','waiting','retry')",(tid,))
                     for job in jobs:
@@ -344,7 +401,7 @@ class ReminderApp(LegacyApp):
             text = '\n\n'.join(job['title'] + ('（' + '、'.join(json.loads(job['members'])) + '）' if job['target_type']=='group' else '') for job in jobs)
             title = f'待办提醒 · {len(jobs)} 件' if len(jobs)>1 else '待办提醒'
             payload = dict(id=first['task_id'], title=jobs[0]['title'], target_type=first['target_type'], group_name=first['route'],
-                           member=members[0] if members else '', members=members, message='【待办提醒】\n'+text+'\n完成后请告知我。',
+                           member=members[0] if members else '', members=members, message='待办提醒\n'+text+'\n完成后请告知我。',
                            _data_dir=str(self.path.parent.resolve()), _avoid_interruption=cfg['wait_idle'], _idle_seconds=cfg['idle_seconds'],
                            _database=str(self.path.resolve()), _expected_mode=first['mode'], _task_versions=[[j['task_id'],j['revision']] for j in jobs])
             retry_delay=60
@@ -370,6 +427,9 @@ class ReminderApp(LegacyApp):
                 self.dispatch_lock.release()
 
     def tick(self, at=None):
+        if time.monotonic()-self.last_cleanup>=3600:
+            self.purge_trash(at=at)
+            self.last_cleanup=time.monotonic()
         self.enqueue(automatic=True, at=at)
         self.process_queue(desktop=True, at=at)
 
@@ -425,7 +485,7 @@ class ReminderApp(LegacyApp):
                         raise ValueError('备份结构不完整')
                     records = [dict(zip([col[0] for col in incoming.execute('SELECT * FROM tasks').description], row)) for row in incoming.execute('SELECT * FROM tasks')]
                     cfg = {**DEFAULTS, **EXTRA_DEFAULTS, **json.loads(incoming.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])}
-                    cfg.update(wait_idle=False,interaction_version=3)
+                    cfg.update(wait_idle=False,compact=True,interaction_version=4)
                     validate_config(cfg)
                     uncertain_ids = {r[0] for r in incoming.execute("SELECT task_id FROM events WHERE status IN ('sending','unknown')")}
                     for task in records:
@@ -439,6 +499,7 @@ class ReminderApp(LegacyApp):
                             raise ValueError('备份负责人类型无效')
                         if not isinstance(task.get('owner_name',''),str) or len(task.get('owner_name',''))>100:
                             raise ValueError('备份负责人无效')
+                        if task.get('purge_after'):parse_time(task['purge_after'])
                     with self.lock:
                         self.backup()
                         with self.connect() as db:
@@ -452,8 +513,10 @@ class ReminderApp(LegacyApp):
                                 db.execute('INSERT INTO tasks(id,title,group_name,member,interval_hours,status,next_due,last_reminded,created,target_type,completed_at,repeat,reminder_finished,recipients,revision,interval_unit,interval_value) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                            tuple(task[k] for k in ('id','title','group_name','member','interval_hours','status','next_due','last_reminded','created')) +
                                            (task.get('target_type','group'), task.get('completed_at'), task.get('repeat',1), task.get('reminder_finished',0), recipients, task.get('revision',1)+1, task.get('interval_unit','hours'), task.get('interval_value',task['interval_hours'])))
-                                db.execute('UPDATE tasks SET owner_scope=?,owner_name=?,deleted_at=?,deleted_status=? WHERE id=?',
-                                           (task.get('owner_scope','delegated' if task.get('target_type') in ('group','contact') else 'mine'),task.get('owner_name',''),task.get('deleted_at'),task.get('deleted_status'),task['id']))
+                                # 导入也给予至少 30 天恢复机会，不在恢复备份后马上清掉其中的回收站。
+                                deadline=iso(max(parse_time(task['purge_after']),now()+timedelta(days=TRASH_DAYS))) if task.get('purge_after') else iso(now()+timedelta(days=TRASH_DAYS))
+                                db.execute('UPDATE tasks SET owner_scope=?,owner_name=?,deleted_at=?,deleted_status=?,purge_after=? WHERE id=?',
+                                           (task.get('owner_scope','delegated' if task.get('target_type') in ('group','contact') else 'mine'),task.get('owner_name',''),task.get('deleted_at'),task.get('deleted_status'),deadline if task['status']=='deleted' else None,task['id']))
                             event_columns = ('id','task_id','at','mode','status','content','detail')
                             for event in incoming.execute('SELECT '+','.join(event_columns)+' FROM events'):
                                 event = list(event)

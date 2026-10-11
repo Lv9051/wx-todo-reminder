@@ -31,8 +31,8 @@ class DesktopShell:
         self.app.widget=self.widget
         self.icon = pystray.Icon('WXTodoReminder', Image.open(RESOURCE_DIR / 'assets/icon.png'), '强芯待办', menu=pystray.Menu(
             pystray.MenuItem('打开待办清单', lambda: self.open(), default=True),
-            pystray.MenuItem('暂停全部提醒', self.toggle, checked=lambda item: not self.app.snapshot()['settings']['enabled']),
-            pystray.MenuItem('桌面悬浮清单',self.toggle_widget,checked=lambda item:self.app.snapshot()['settings']['widget_enabled']),
+            pystray.MenuItem('暂停全部提醒', self.toggle, checked=lambda item: not self.settings()['enabled']),
+            pystray.MenuItem('桌面悬浮清单',self.toggle_widget,checked=lambda item:self.settings()['widget_enabled']),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem('退出软件', self.quit)))
 
@@ -87,8 +87,11 @@ class DesktopShell:
                 logging.getLogger(__name__).warning('提示音未播放；桌面通知已提交')
 
     def toggle(self, icon, item):
-        self.app.save_settings({'enabled':not self.app.snapshot()['settings']['enabled']})
+        self.app.save_settings({'enabled':not self.settings()['enabled']})
         icon.update_menu()
+
+    def settings(self):
+        with self.app.lock,self.app.connect() as db:return self.app.config(db)
 
     def quit(self):
         self.app.stop.set()
@@ -107,5 +110,5 @@ class DesktopShell:
             self.window_process.terminate()
 
     def toggle_widget(self,icon,item):
-        self.app.save_settings({'widget_enabled':not self.app.snapshot()['settings']['widget_enabled']})
+        self.app.save_settings({'widget_enabled':not self.settings()['widget_enabled']})
         icon.update_menu()
