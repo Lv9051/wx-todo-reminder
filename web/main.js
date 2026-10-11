@@ -37,7 +37,7 @@ async function mutate(path,data,success,undo){
  }catch(error){toast(error.message,true);return false}
  finally{animations.forEach(a=>a.cancel())}
 }
-function nodeKey(node){return node.nodeType===1?(node.getAttribute('data-task')||node.getAttribute('data-group')||node.getAttribute('data-date')||''):''}
+function nodeKey(node){return node.nodeType===1?(node.getAttribute('data-task')||node.getAttribute('data-group')||node.getAttribute('data-date')||node.getAttribute('data-event')||''):''}
 function patchChildren(root,template){
  const originals=[...root.childNodes],keyed=new Map(originals.filter(n=>nodeKey(n)).map(n=>[nodeKey(n),n])),used=new Set();let cursor=root.firstChild;
  for(const desired of [...template.childNodes]){
@@ -90,7 +90,7 @@ function render(){
  $("#engine-description").textContent=cfg.mode==="preview"?"到点只生成预览记录": "提醒自己弹桌面通知；提醒别人自动发微信";
  $("#toggle-engine").textContent=cfg.enabled?"暂停提醒":"开启提醒";$("#clock").textContent=formatTime(state.server_time)+" · 北京时间";
  $("#notification-state").textContent=state.desktop_notifications?"桌面通知已就绪；关闭页面后仍能提醒。":"请使用桌面软件或 start.bat 启动，让程序驻留托盘。";
- $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.2"} · 本地保存`;
+ $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.3"} · 本地保存`;
  $("#data-location").textContent=state.data_path?"数据位置："+state.data_path:"";
  $("#queue-count").textContent=state.queue_count?state.queue_count+" 条提醒排队中":"";
  for(const id of selected)if(!state.tasks.some(t=>t.id===id&&!['done','deleted'].includes(t.status)))selected.delete(id);
@@ -137,6 +137,7 @@ async function loadHistory(more=false){
 }
 function renderHistory(){
  if(view!=='history')return;
+ $('#empty-trash').hidden=historyStatus!=='deleted'||!state.history_counts.deleted;
  if(historyData.key!==historyKey())loadHistory();else if(!historyLoading)paintHistory();
  const historyTabs=document.querySelectorAll('[data-history]');selectPill(historyTabs,[...historyTabs].find(b=>b.dataset.history===historyStatus));
  $('#history-note').textContent=historyStatus==='deleted'?'删除后保留 30 天，到期自动清理；清理前会备份。':'完成记录长期保留，按完成日期整理。';
@@ -150,7 +151,7 @@ function paintHistory(){
 }
 function renderEvents(){
  const statuses={queued:"已排队",waiting:"等待可发送条件",cancelled:"已取消",preview:"预览 · 未发送",notified:"已提交桌面通知",operated:"微信已执行发送",sending:"正在处理",retry:"等待自动重试",unknown:"状态待核对 · 已暂停"};
- writeHTML("#event-list",JSON.stringify(state.events),state.events.length?state.events.map(e=>`<article class="event-card"><div class="event-head"><span>待办 #${e.task_id} · ${formatTime(e.at)}</span><span class="event-status ${escapeHTML(e.status)}">${escapeHTML(statuses[e.status]||e.status)}</span></div><div class="event-content">${escapeHTML(e.content)}</div><div class="event-detail">${escapeHTML(e.detail)}</div></article>`).join(""):empty("还没有提醒记录","保存计划后，到点自动提醒，并在这里留下记录。"));
+ writeHTML("#event-list",JSON.stringify(state.events),state.events.length?state.events.map(e=>`<article class="event-card"><div class="event-head"><span>${formatTime(e.at)}</span><span class="event-status ${escapeHTML(e.status)}">${escapeHTML(statuses[e.status]||e.status)}</span></div><div class="event-content">${escapeHTML(e.content)}</div>${e.detail?`<details class="event-details" data-event="${e.id}"><summary>详情</summary><div class="event-detail">${escapeHTML(e.detail)}</div></details>`:''}</article>`).join(""):empty("还没有提醒记录","保存计划后，到点自动提醒，并在这里留下记录。"));
 }
 function setDue(date){
  $("#task-form").elements.first_due.value=bjParts(date).slice(0,16);updateScheduleSummary();
@@ -324,3 +325,13 @@ function schedulePreview(b){if(!state)return;previewAnchor=b;const t=findTask(b.
 for(const list of ['#task-list','#history-list']){const el=$(list);el.addEventListener('pointerover',e=>{const b=e.target.closest('.task-title');if(!b||b.contains(e.relatedTarget)||!state)return;hidePreview();schedulePreview(b)});el.addEventListener('pointermove',e=>{const b=e.target.closest('.task-title');if(b&&!previewTimer&&$('#task-preview').hidden)schedulePreview(b)});el.addEventListener('pointerout',e=>{if(e.target.closest('.task-title')){hidePreview();previewAnchor=null}});el.addEventListener('focusin',e=>{const b=e.target.closest('.task-title');if(b&&state){const t=findTask(b.dataset.id);if(t)showPreview(b,t)}});el.addEventListener('focusout',()=>{hidePreview();previewAnchor=null})}
 window.addEventListener('scroll',()=>{const b=previewAnchor;hidePreview();if(menuAnchor?.isConnected&&!$('#action-menu').inert)placePopup($('#action-menu'),menuAnchor);if(b?.isConnected&&b.matches(':hover'))schedulePreview(b)},true);
 window.addEventListener('wheel',e=>{if(!e.target.closest('#action-menu'))hideMenu()},{passive:true});
+
+$('#empty-trash').onclick=async()=>{
+ const button=$('#empty-trash');button.disabled=true;
+ try{
+  const summary=await request('/api/trash-summary');
+  if(!summary.count){accept(await request('/api/state'));return}
+  if(!await confirmAction({title:`清空回收站的 ${summary.count} 件事项？`,description:'彻底删除回收站全部事项，包含当前筛选未显示的内容。删除前自动备份；未完成和已完成清单不受影响。',accept:'清空回收站',danger:true}))return;
+  const result=await request('/api/trash/empty',summary);accept(result);toast(`已清空 ${result.deleted_count} 件事项，清理前已自动备份`);
+ }catch(error){toast(error.message,true)}finally{button.disabled=false}
+};

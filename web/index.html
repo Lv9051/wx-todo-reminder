@@ -22,7 +22,7 @@
    <div class="bulk-bar" id="bulk-bar" hidden><label class="check"><input type="checkbox" id="select-visible"> 全选当前列表</label><span id="selected-count" class="muted"></span><button class="secondary" id="remind-selected">提醒已选</button><button class="secondary danger" id="delete-selected">删除已选</button><button class="text-button" id="cancel-select">完成选择</button></div><div class="task-list" id="task-list"></div>
    <div class="tip">✦ 完成一件，勾掉一件。完成的事项自动进入历史待办，可以随时重新开启。</div>
   </section>
-  <section id="history-view" hidden><div class="section-bar"><div class="tabs"><button data-history="done" class="selected">已完成</button><button data-history="deleted">回收站</button></div><div class="list-tools"><select id="history-month" aria-label="按月份查看历史"><option value="">全部月份</option></select><label class="search">⌕ <input id="history-search" maxlength="500" placeholder="搜索历史待办" aria-label="搜索历史待办"></label></div></div><p class="history-note muted" id="history-note">完成记录长期保留。</p><div class="task-list" id="history-list"></div><button class="secondary history-more" id="history-more" hidden>查看更多</button></section>
+  <section id="history-view" hidden><div class="section-bar"><div class="tabs"><button data-history="done" class="selected">已完成</button><button data-history="deleted">回收站</button></div><div class="list-tools"><button type="button" class="text-button danger" id="empty-trash" hidden>清空回收站</button><select id="history-month" aria-label="按月份查看历史"><option value="">全部月份</option></select><label class="search">⌕ <input id="history-search" maxlength="500" placeholder="搜索历史待办" aria-label="搜索历史待办"></label></div></div><p class="history-note muted" id="history-note">完成记录长期保留。</p><div class="task-list" id="history-list"></div><button class="secondary history-more" id="history-more" hidden>查看更多</button></section>
   <section id="events-view" hidden><div class="section-bar"><h2>最近的提醒记录</h2><span class="muted">最近 100 条 · 北京时间</span></div><div id="event-list"></div></section>
   <section id="settings-view" hidden>
    <div class="connection-panel"><div><h2>提醒自己</h2><p class="muted" id="notification-state">正在检查桌面通知…</p></div><button class="secondary" id="test-notification">弹一条测试通知</button></div>
@@ -37,7 +37,7 @@
    <div class="connection-panel"><div><h2>微信连接检查</h2><p class="muted">提醒自己不需要微信。提醒别人时，微信需登录且桌面解锁。</p></div><button class="secondary" id="diagnose">检查环境</button><div id="diagnostic-result" class="diagnostic-result" hidden></div></div>
    <div class="connection-panel"><div><h2>数据与备份</h2><p class="muted">清单自动保存；导入旧版本的 data/reminders.db 可恢复原有待办。恢复前会自动备份当前清单。</p><p class="muted" id="data-location"></p></div><button class="secondary" id="backup-data">导出备份</button><button class="secondary" id="restore-data">恢复备份</button><input type="file" id="restore-file" accept=".db" hidden></div><div class="tip">关闭窗口后，软件仍在托盘运行。右键托盘图标可打开清单、暂停或退出。Windows 的“请勿打扰”可能将通知收进通知中心。</div>
   </section>
-  <footer>强芯待办 <span id="version-label">v1.4.2 · 本地保存</span></footer>
+  <footer>强芯待办 <span id="version-label">v1.4.3 · 本地保存</span></footer>
  </main>
  <dialog id="task-dialog"><form id="task-form">
   <div class="dialog-heading"><div><div class="eyebrow">ONE THING AT A TIME</div><h2 id="dialog-title">新建待办</h2></div><button type="button" class="icon-button" id="close-dialog" aria-label="关闭">×</button></div><div class="draft-return" id="draft-return" hidden><span>新事项草稿已保留</span><button type="button" class="text-button" id="back-to-draft">返回草稿</button></div>

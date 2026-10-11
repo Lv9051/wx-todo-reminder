@@ -24,17 +24,18 @@ def build(output=None):
                 path=distribution.locate_file(file)
                 if path.is_file() and path.suffix.lower() not in ('.py','.pyc','.pyd','.dll'):
                     licenses[f'强芯待办/LICENSES/{name}/{file.name}']=path
-    with zipfile.ZipFile(package,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
-        z.write(output/'WXTodoReminder.exe','强芯待办/强芯待办.exe')
-        for name in ('README.md','LICENSE','THIRD_PARTY_NOTICES.md'):
-            z.write(ROOT/name,'强芯待办/'+name)
-        z.write(ROOT/'vendor/wechatauto-replica/LICENSE','强芯待办/LICENSES/wechatauto-replica/LICENSE')
-        python_license=Path(sys.base_prefix)/'LICENSE.txt'
-        if python_license.exists():
-            z.write(python_license,'强芯待办/LICENSES/Python/LICENSE.txt')
-        for name,path in licenses.items():z.write(path,name)
-        contents=z.namelist()
-        assert not any('/data/' in n or '/docs/' in n or n.endswith(('.db','.log')) or 'AGENTS' in n for n in contents)
+    for target,prefix,program in ((package,'WXTodoReminder','WXTodoReminder.exe'),):
+        with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+            z.write(output/'WXTodoReminder.exe',prefix+'/'+program)
+            for name in ('README.md','LICENSE','THIRD_PARTY_NOTICES.md'):
+                z.write(ROOT/name,prefix+'/'+name)
+            z.write(ROOT/'vendor/wechatauto-replica/LICENSE',prefix+'/LICENSES/wechatauto-replica/LICENSE')
+            python_license=Path(sys.base_prefix)/'LICENSE.txt'
+            if python_license.exists():
+                z.write(python_license,prefix+'/LICENSES/Python/LICENSE.txt')
+            for name,path in licenses.items():z.write(path,name.replace('强芯待办/',prefix+'/',1))
+            contents=z.namelist()
+            assert not any('/data/' in n or '/docs/' in n or n.endswith(('.db','.log')) or 'AGENTS' in n for n in contents)
     sums=[]
     for file in (package,output/'WXTodoReminder.exe'):
         sums.append(hashlib.sha256(file.read_bytes()).hexdigest()+'  '+file.name)

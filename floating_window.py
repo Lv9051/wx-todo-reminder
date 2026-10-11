@@ -183,7 +183,7 @@ class FloatingTodo:
         text(59,18 if self.expanded else 17,'我的待办' if self.scope=='mine' else '全部待办',15,bold=True)
         if not self.expanded:
             image.alpha_composite(panel,(PADDING*s,PADDING*s));return image.resize((width,height),Image.Resampling.LANCZOS)
-        text(59,42,'拖动这里移动',10,'#93a396')
+        text(59,42,'点击收起 · 拖动移动',10,'#93a396')
         for key,x in (('more',269),('close',300)):
             if self.hover==key:rect((x-4,20,x+24,48),'#eaf2e8',7)
         for x in (272,279,286):d.ellipse((x*s,33*s,(x+3)*s,36*s),fill='#7e9385')
@@ -193,7 +193,7 @@ class FloatingTodo:
         for row in self.rows:
             top=round(row['top']-self.offset)
             if top+row['height']<0 or top>=LIST_BOTTOM-LIST_TOP:continue
-            if self.hover==row['task']['id']:ld.rounded_rectangle((13*s,top*s,315*s,(top+row['height']-2)*s),radius=9*s,fill='#edf5ed')
+            if not self.menu and self.hover==row['task']['id']:ld.rounded_rectangle((13*s,top*s,315*s,(top+row['height']-2)*s),radius=9*s,fill='#edf5ed')
             cy=top+(row['height']-17)//2
             ld.rounded_rectangle((23*s,cy*s,40*s,(cy+17)*s),radius=5*s,outline='#b7cdbd',width=s)
             for i,line in enumerate(row['lines']):ld.text((52*s,(top+10+i*21)*s),line,font=self._font(13),fill='#8c9d91' if row['task']['status']=='paused' else '#2b4035',anchor='lt')
@@ -202,13 +202,19 @@ class FloatingTodo:
         if not self.rows:ld.text((89*s,86*s),'事情做完了，歇一会。',font=self._font(12),fill='#90a494',anchor='lt')
         panel.alpha_composite(viewport,(0,LIST_TOP*s));d=ImageDraw.Draw(panel)
         maximum,top,length=scrollbar_geometry(self.content_height,self.offset)
-        if maximum:
+        if maximum and not self.menu:
             rect((324,LIST_TOP,328,LIST_BOTTOM),'#edf2eb',2);rect((324,top,328,top+length),'#99b49e' if self.thumb_drag else '#bdcebe',2)
         d.line((18*s,337*s,318*s,337*s),fill='#e7eee6',width=s)
-        text(19,352,'打开完整清单 ↗',11,'#427c55');text(236,353,'向下滚动' if maximum else '慢慢完成',10,'#9eac9f')
+        text(19,352,'打开完整清单 ↗',11,'#427c55');text(236,353,'选择查看范围' if self.menu else '向下滚动' if maximum else '慢慢完成',10,'#9eac9f')
         if self.menu:
-            rect((178,48,321,175),'#dce5dc',10);rect((177,46,320,173),'white',10,'#e0e9df')
-            for i,(label,chosen) in enumerate((('我的待办',self.scope=='mine'),('全部待办',self.scope=='all'),('收起小窗',False))):text(190,59+i*37,('✓ ' if chosen else '   ')+label,12,'#247451' if chosen else '#657b6a')
+            rect((14,LIST_TOP,321,LIST_BOTTOM),'#f3f7f2',8)
+            rect((23,87,315,222),'#dce5dc',12);rect((22,84,314,219),'white',12,'#d8e6da')
+            for i,(label,chosen) in enumerate((('我的待办',self.scope=='mine'),('全部待办',self.scope=='all'),('收起小窗',False))):
+                row_y=94+i*37
+                if chosen:
+                    rect((30,row_y-4,306,row_y+27),'#edf5ed',7)
+                    d.line(((39*s,(row_y+10)*s),(43*s,(row_y+14)*s),(50*s,(row_y+5)*s)),fill='#247451',width=2*s,joint='curve')
+                text(60,row_y+5,label,12,'#247451' if chosen else '#657b6a')
         image.alpha_composite(panel,(PADDING*s,PADDING*s));return image.resize((width,height),Image.Resampling.LANCZOS)
 
     def _paint(self):
@@ -271,8 +277,8 @@ class FloatingTodo:
             if not (0<=x<self._size()[0]-2*PADDING and 0<=y<self._size()[1]-2*PADDING):return 0
             if self.menu:
                 self.menu=False
-                if 177<=x<=320 and 46<=y<173:
-                    index=(y-46)//37
+                if 22<=x<=314 and 84<=y<195:
+                    index=(y-84)//37
                     if index<2:self.app.save_settings(dict(widget_scope='mine' if index==0 else 'all'));self.offset=0;self._poll()
                     else:self.expanded=False;self._layout()
                 self._paint();return 0
@@ -293,7 +299,7 @@ class FloatingTodo:
         if message==c.WM_LBUTTONUP:
             if self.drag:
                 self._finish_drag();g.ReleaseCapture()
-                if not self.dragged and not self.expanded:self.expanded=True;self._layout()
+                if not self.dragged:self.expanded=not self.expanded;self.menu=False;self.hover=None;self._layout()
             if self.thumb_drag is not None:self.thumb_drag=None;g.ReleaseCapture();self._paint()
             return 0
         if message==c.WM_CAPTURECHANGED:self._finish_drag();self.thumb_drag=None;return 0

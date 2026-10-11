@@ -426,6 +426,8 @@ def serve(app, port):
                                                     search=query.get('search',[''])[0], offset=int(query.get('offset',['0'])[0])))
                 except (ValueError, TypeError) as exc:
                     return self.respond({'error':str(exc)},400)
+            if path == '/api/trash-summary':
+                return self.respond(app.trash_summary())
             if path == '/api/backup':
                 return self.respond(app.backup().read_bytes(), content_type='application/octet-stream')
             if path == "/api/diagnostic":
@@ -454,6 +456,9 @@ def serve(app, port):
                 path = urlsplit(self.path).path
                 if path == "/api/settings":
                     app.save_settings(body)
+                elif path == '/api/trash/empty':
+                    count = app.empty_trash(body)
+                    return self.respond({**app.snapshot(include_history=False), 'deleted_count': count})
                 elif path == "/api/tasks":
                     app.create(body)
                 elif path == '/api/remind-all':
@@ -519,6 +524,12 @@ def main(desktop=False):
             with opener.open(url + "/api/state", timeout=3) as response:
                 state = json.load(response)
             if isinstance(state, dict) and str(state.get("build", "")).startswith("auto-uia-"):
+                if FROZEN and desktop and state.get('version') and state['version']!=VERSION:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(0,
+                        f"已有版本 v{state['version']} 仍在后台运行，本次打开的是 v{VERSION}。\n\n请右键托盘的绿色对号，选择“退出软件”，再打开新版。\n关闭主窗口并不会退出后台；原有待办会保留。",
+                        '强芯待办 · 请先退出旧版本',0x40)
+                    return
                 print(f"待办提醒已经运行，打开页面：{url}", flush=True)
                 if not args.no_browser:
                     if desktop:

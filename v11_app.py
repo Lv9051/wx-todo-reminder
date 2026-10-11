@@ -1,5 +1,6 @@
 """1.1 持久化发送队列；桌面通知与微信分别执行，按会话汇总。"""
 import base64
+import hashlib
 import json
 import math
 import re
@@ -13,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from app import ReminderApp as LegacyApp, DEFAULTS, RetryableSendError, transport, validate_task, now, iso, parse_time, next_allowed, clock
 
-EXTRA_DEFAULTS = dict(wait_idle=False, idle_seconds=1, sound_enabled=True, compact=True,widget_enabled=False,widget_position=None,widget_scope='mine')
+EXTRA_DEFAULTS = dict(wait_idle=False, idle_seconds=1, sound_enabled=True, compact=True,widget_enabled=True,widget_position=None,widget_scope='mine')
 PENDING = ('queued', 'waiting', 'retry', 'sending')
 TRASH_DAYS = 30
 
@@ -186,6 +187,35 @@ class ReminderApp(LegacyApp):
             for task in tasks:task['recipients']=json.loads(task['recipients'])
             months=[r[0] for r in db.execute('SELECT DISTINCT substr('+stamp+',1,7) AS month FROM tasks WHERE status=? ORDER BY month DESC',(status,)) if r[0]]
         return dict(tasks=tasks,months=months,total=total,has_more=offset+len(tasks)<total,trash_days=TRASH_DAYS)
+
+    @staticmethod
+    def _trash_summary(db):
+        rows=[tuple(r) for r in db.execute("SELECT id,revision,deleted_at FROM tasks WHERE status='deleted' ORDER BY id")]
+        return dict(count=len(rows),revision=hashlib.sha256(json.dumps(rows).encode()).hexdigest())
+
+    def trash_summary(self):
+        with self.lock,self.connect() as db:
+            return self._trash_summary(db)
+
+    def empty_trash(self, body):
+        with self.lock:
+            with self.connect() as db:
+                summary=self._trash_summary(db)
+                if type(body.get('count')) is not int or body.get('count')!=summary['count'] or body.get('revision')!=summary['revision']:
+                    raise ValueError('回收站已变化，请重新确认后清空')
+                if not summary['count']:return 0
+                if db.execute("SELECT 1 FROM jobs j JOIN tasks t ON t.id=j.task_id WHERE t.status='deleted' AND j.status='sending' LIMIT 1").fetchone():
+                    raise ValueError('有提醒正在结束处理，请稍后再清空回收站')
+                ids=[r[0] for r in db.execute("SELECT id FROM tasks WHERE status='deleted'")]
+            try:self.backup()
+            except (OSError,sqlite3.Error) as exc:
+                raise ValueError('备份未成功，未清空回收站；请检查磁盘空间后重试') from exc
+            with self.connect() as db:
+                db.execute("DELETE FROM jobs WHERE task_id IN (SELECT id FROM tasks WHERE status='deleted')")
+                db.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM tasks WHERE status='deleted')")
+                db.execute("DELETE FROM tasks WHERE status='deleted'")
+            for tid in ids:self.undo_records.pop(tid,None)
+            return len(ids)
 
     def purge_trash(self, at=None):
         value=at or now()

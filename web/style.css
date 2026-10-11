@@ -158,3 +158,14 @@ input:not([type=checkbox]):not([type=radio]):focus,textarea:focus,select:focus{b
 ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#cad7c9;border:2px solid transparent;background-clip:padding-box;border-radius:8px}::-webkit-scrollbar-thumb:hover{background-color:#a7bca8}::-webkit-scrollbar-track{background:transparent}
 @media(max-width:900px){.compact main{padding:0 24px}.compact .task-actions button{padding:5px 7px}.compact .task-actions{gap:4px}.tabs button{padding:7px 11px}}
 @media(max-width:650px){.compact main{padding:0 16px}.compact .sidebar{padding:14px}.compact .task-actions button{min-height:35px}.tabs button{min-height:36px}.compact h1{font-size:20px}dialog{padding:22px}.task-card .task-time{white-space:normal}}
+
+/* 提醒记录优先显示正文和状态，技术说明按需展开。 */
+#empty-trash{font-size:12px;padding:8px;white-space:nowrap}
+.event-card{padding:11px 16px;margin-bottom:7px;border-radius:10px;position:relative}
+.event-head{font-size:10px;gap:12px;line-height:1.6}
+.event-content{margin:5px 50px 0 0;font-size:12px;line-height:1.65;max-height:80px;overflow:auto}
+.event-details{margin-top:5px;font-size:10px;color:#76907b}
+.event-details summary{cursor:pointer;width:max-content}
+.event-details:not([open]){position:absolute;right:16px;bottom:11px}
+.event-detail{padding-top:5px;line-height:1.6;color:#758578}
+@media(max-width:650px){.event-card{padding:10px 12px}.event-status{max-width:55%;text-align:right}}
