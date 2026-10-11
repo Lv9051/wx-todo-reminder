@@ -2,3 +2,5 @@ pywin32==312
 uiautomation==2.0.29
 Pillow==12.3.0
 pystray==0.19.5
+pywebview==6.2.1
+pythonnet==3.2.1

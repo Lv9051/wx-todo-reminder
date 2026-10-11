@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>待办提醒 · WX Reminder</title><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>强芯待办</title><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/style.css"></head>
 <body>
  <aside class="sidebar">
-  <a class="brand" href="/"><span class="brand-icon">✓</span><span>待办提醒<small>WX REMINDER</small></span></a>
+  <a class="brand" href="/"><span class="brand-icon">✓</span><span>强芯待办<small>记下来，慢慢完成</small></span></a>
   <div class="workspace-label">我的工作台</div>
   <button class="nav active" data-view="tasks"><span>▦</span> 待办清单 <b id="nav-count">0</b></button>
   <button class="nav" data-view="history"><span>◷</span> 历史待办 <b id="history-count">0</b></button>
@@ -13,19 +13,21 @@
  </aside>
  <main>
   <header class="topbar"><span>工作台 <span class="crumb">/</span> <b id="breadcrumb">待办清单</b></span><span class="clock" id="clock"></span></header>
-  <section class="page-heading"><div><div class="eyebrow">KEEP THINGS MOVING</div><h1 id="page-title">让每件事，都有着落。</h1><p id="page-description">提醒自己，也提醒别人。记下来，剩下的交给时间。</p></div><button class="primary" id="new-task">＋ 新建待办</button></section>
+  <section class="page-heading"><div><div class="eyebrow">KEEP THINGS MOVING</div><h1 id="page-title">记下来，一件件完成。</h1><p id="page-description">先记待办。需要时，再添加提醒。</p></div><button class="primary" id="new-task">＋ 新建待办</button></section>
   <div class="engine-banner"><span class="status-dot" id="engine-dot"></span><div><strong id="engine-title">正在连接本地服务</strong><span id="engine-description">读取待办与提醒设置…</span></div><button class="text-button" id="toggle-engine">暂停提醒</button></div>
   <section id="tasks-view">
    <div class="stats"><article><span>正在进行</span><strong id="active-count">0</strong><small id="active-subtitle">今天，一件件完成。</small></article><article><span>今天的提醒</span><strong id="today-count">0</strong><small>桌面通知、微信发送与预览</small></article><article><span>已经完成</span><strong id="done-count">0</strong><button class="text-button" data-view="history">查看历史待办 →</button></article></div>
-   <div class="section-bar"><div class="tabs"><button data-filter="active" class="selected">进行中</button><button data-filter="paused">已暂停</button><button data-filter="all">全部待办</button></div><label class="search">⌕ <input id="search" placeholder="搜索待办、联系人或群名" aria-label="搜索待办"></label></div>
-   <div class="task-list" id="task-list"></div>
+   <form id="quick-add" class="quick-add"><span>＋</span><input name="title" maxlength="500" placeholder="记下一件事，按 Enter 保存" aria-label="快速新增待办" required><button class="primary" type="submit">添加</button><button class="text-button" type="button" id="quick-reminder">设置提醒</button></form>
+   <div class="section-bar"><div class="tabs"><button data-scope="mine" class="selected">我的待办</button><button data-scope="delegated">我交办的</button><button data-scope="all">全部</button></div><div class="list-tools"><select id="status-filter" aria-label="筛选事项"><option value="active">进行中</option><option value="all">全部状态</option><option value="paused">已暂停</option><option value="reminders">有提醒</option></select><label class="search">⌕ <input id="search" placeholder="搜索事项或负责人" aria-label="搜索待办"></label><button class="secondary" id="list-more" aria-label="清单更多操作" aria-haspopup="menu">⋯</button></div></div>
+   <div id="attention-banner" class="attention-banner" hidden></div><span id="queue-count" class="muted"></span>
+   <div class="bulk-bar" id="bulk-bar" hidden><label class="check"><input type="checkbox" id="select-visible"> 全选当前列表</label><span id="selected-count" class="muted"></span><button class="secondary" id="remind-selected">提醒已选</button><button class="secondary danger" id="delete-selected">删除已选</button><button class="text-button" id="cancel-select">完成选择</button></div><div class="task-list" id="task-list"></div>
    <div class="tip">✦ 完成一件，勾掉一件。完成的事项自动进入历史待办，可以随时重新开启。</div>
   </section>
-  <section id="history-view" hidden><div class="section-bar"><h2>已经做完的事</h2><label class="search">⌕ <input id="history-search" placeholder="搜索历史待办" aria-label="搜索历史待办"></label></div><div class="task-list" id="history-list"></div></section>
+  <section id="history-view" hidden><div class="section-bar"><div class="tabs"><button data-history="done" class="selected">已完成</button><button data-history="deleted">回收站</button></div><label class="search">⌕ <input id="history-search" placeholder="搜索历史待办" aria-label="搜索历史待办"></label></div><div class="task-list" id="history-list"></div></section>
   <section id="events-view" hidden><div class="section-bar"><h2>最近的提醒记录</h2><span class="muted">最近 100 条 · 北京时间</span></div><div id="event-list"></div></section>
   <section id="settings-view" hidden>
    <div class="connection-panel"><div><h2>提醒自己</h2><p class="muted" id="notification-state">正在检查桌面通知…</p></div><button class="secondary" id="test-notification">弹一条测试通知</button></div>
-   <form id="settings-form" class="settings-panel">
+   <form id="settings-form" class="settings-panel"><h2>日常使用</h2><label class="check"><input type="checkbox" name="startup_enabled"> 开机自启动（登录 Windows 后驻留托盘）</label><label class="check"><input type="checkbox" name="widget_enabled"> 桌面待办小窗</label><small class="setting-help">开启后立即显示。拖动顶部移动，点击事项左侧完成；位置会保存。</small><div class="widget-feedback"><span class="muted" id="widget-state"></span><button type="button" class="text-button" id="reset-widget">显示到屏幕中央</button></div><label class="check"><input type="checkbox" name="compact" checked> 紧凑清单</label><label class="check"><input type="checkbox" name="sound_enabled" checked> 播放柔和提示音</label><p class="muted">到点直接尝试发送微信，不等待键鼠空闲；已有草稿时会保留并稍后重试。</p>
     <h2>提醒方式</h2><p class="muted">正常提醒会弹出自己的桌面通知，或向指定微信对象发送。预览只生成记录。</p>
     <div class="mode-options"><label><input type="radio" name="mode" value="wechat"><span><b>正常提醒</b><small>桌面通知 / 微信私聊 / 群内 @</small></span></label><label><input type="radio" name="mode" value="preview"><span><b>预览模式</b><small>只生成记录，不弹通知、不发微信</small></span></label></div>
     <h2>提醒时段</h2><p class="muted">按北京时间计算，超出时段会顺延。每日上限设为 0 表示不限。</p>
@@ -34,25 +36,31 @@
     <div class="settings-footer"><span>设置会保留，重启后继续执行。</span><button class="primary" type="submit">保存设置</button></div>
    </form>
    <div class="connection-panel"><div><h2>微信连接检查</h2><p class="muted">提醒自己不需要微信。提醒别人时，微信需登录且桌面解锁。</p></div><button class="secondary" id="diagnose">检查环境</button><div id="diagnostic-result" class="diagnostic-result" hidden></div></div>
-   <div class="tip">关闭页面后，软件仍在托盘运行。右键托盘图标可打开清单、暂停或退出。Windows 的“请勿打扰”可能将通知收进通知中心。</div>
+   <div class="connection-panel"><div><h2>数据与备份</h2><p class="muted">清单自动保存；导入旧版本的 data/reminders.db 可恢复原有待办。恢复前会自动备份当前清单。</p><p class="muted" id="data-location"></p></div><button class="secondary" id="backup-data">导出备份</button><button class="secondary" id="restore-data">恢复备份</button><input type="file" id="restore-file" accept=".db" hidden></div><div class="tip">关闭窗口后，软件仍在托盘运行。右键托盘图标可打开清单、暂停或退出。Windows 的“请勿打扰”可能将通知收进通知中心。</div>
   </section>
-  <footer>WX REMINDER <span id="version-label">v1.0.0 · 纯脚本 · Asia/Shanghai</span></footer>
+  <footer>强芯待办 <span id="version-label">v1.2.0 · 本地保存</span></footer>
  </main>
  <dialog id="task-dialog"><form id="task-form">
   <div class="dialog-heading"><div><div class="eyebrow">ONE THING AT A TIME</div><h2 id="dialog-title">新建待办</h2></div><button type="button" class="icon-button" id="close-dialog" aria-label="关闭">×</button></div>
   <label>要做什么<textarea name="title" rows="2" maxlength="500" placeholder="例如：整理实验数据，提交结果报告" required autofocus></textarea></label>
-  <label>怎么提醒<select name="target_type"><option value="self">提醒自己 · 桌面通知</option><option value="contact">提醒别人 · 微信私聊</option><option value="group">提醒别人 · 群内 @</option><option value="local">仅记录 · 不提醒</option></select><small id="target-hint"></small></label>
-  <div class="field-row" id="recipient-fields"><label><span id="target-label">联系人名称或备注名</span><input name="group_name" maxlength="100"></label><label id="member-field">@ 菜单里的成员名称<input name="member" maxlength="100"></label></div>
+  <div class="ownership-row"><label>谁的事<select name="owner_scope"><option value="mine">我的待办</option><option value="delegated">我交办的</option></select></label><label id="owner-field" hidden>负责人<input name="owner_name" maxlength="100" placeholder="可不填，沿用微信提醒对象"></label></div>
+  <label class="check reminder-toggle"><input type="checkbox" name="reminder_enabled"> 添加提醒 <span class="muted">需要时再设置时间与对象</span></label>
+  <div id="reminder-options" hidden>
+  <label>怎么提醒<select name="target_type"><option value="self">提醒自己 · 桌面通知</option><option value="contact">提醒别人 · 微信私聊</option><option value="group">提醒别人 · 群内 @</option></select><small id="target-hint"></small></label>
+  <div class="field-row" id="recipient-fields"><label><span id="target-label">联系人名称或备注名</span><textarea name="group_name" rows="2" maxlength="3030"></textarea></label><label id="member-field">群成员（每行一位）<textarea name="member" rows="2" maxlength="3030"></textarea></label></div>
   <div id="schedule-fields">
    <label>开始提醒<input type="datetime-local" name="first_due" required><small>新建时默认当前时间，也可以直接修改日期和时间。</small></label>
    <div class="schedule-summary" id="schedule-summary"></div>
    <label class="check repeat-toggle"><input type="checkbox" name="repeat"> 未完成时，重复提醒</label>
-   <div id="repeat-fields"><label>提醒间隔<div class="interval-field"><input name="interval_hours" type="number" value="3" min="0.1" max="720" step="0.1"><span>小时</span></div></label><div class="quick-times"><button type="button" data-interval="0.5">30 分钟</button><button type="button" data-interval="1">1 小时</button><button type="button" data-interval="3">3 小时</button><button type="button" data-interval="24">每天</button></div></div>
+   <div id="repeat-fields"><label>提醒间隔<div class="interval-field"><input name="interval_hours" type="number" value="3" min="0.1" max="720" step="0.1"><select name="interval_unit" aria-label="周期单位"><option value="hours">小时</option><option value="days">天</option><option value="weeks">周</option></select></div></label><div class="quick-times"><button type="button" data-interval="0.5" data-unit="hours">30 分钟</button><button type="button" data-interval="1" data-unit="hours">1 小时</button><button type="button" data-interval="3" data-unit="hours">3 小时</button><button type="button" data-interval="1" data-unit="days">每天</button><button type="button" data-interval="3" data-unit="days">每三天</button><button type="button" data-interval="1" data-unit="weeks">每周</button></div></div>
    <label class="check"><input type="checkbox" name="auto_start" checked> 保存后开启自动提醒</label><small class="save-hint" id="save-hint"></small>
+  </div>
   </div>
   <div class="dialog-footer"><span class="muted">Ctrl + Enter 快速保存</span><button type="button" class="secondary" id="cancel-dialog">取消</button><button type="submit" class="primary">保存待办</button></div>
  </form></dialog>
  <div id="toast" role="status" aria-live="polite" hidden><span id="toast-text"></span><button id="toast-undo" hidden>撤销</button></div>
+ <div id="action-menu" class="action-menu" role="menu" hidden></div>
+ <div id="task-preview" class="task-preview" role="tooltip" hidden><div class="preview-label">完整事项</div><div id="preview-title"></div><div id="preview-meta"></div><small>点击事项，查看或编辑详情</small></div>
  <script src="/main.js"></script>
 </body>
 </html>

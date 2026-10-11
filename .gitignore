@@ -8,3 +8,7 @@ __pycache__/
 *.log
 vendor/wx4py/
 vendor/wxauto41/
+docs/
+AGENTS.md
+.agents/
+.codex/

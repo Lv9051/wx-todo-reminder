@@ -30,3 +30,6 @@ https://github.com/benjaminp/six
 https://github.com/pyinstaller/pyinstaller
 
 The release ZIP includes available dependency license texts in LICENSES/.
+# 桌面窗口依赖
+
+独立桌面窗口使用 pywebview（BSD-3-Clause）及 pythonnet（MIT），以 Microsoft WebView2 Runtime 渲染界面。安装包包含依赖许可证；WebView2 Runtime 使用系统安装版本，不随本软件重新分发。官方项目：https://github.com/r0x0r/pywebview 、https://github.com/pythonnet/pythonnet 。

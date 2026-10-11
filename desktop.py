@@ -13,9 +13,30 @@ def main():
         from wechat_adapter import main as worker
         worker()
         return
+    if '--desktop-window' in sys.argv:
+        from native_window import run
+        index=sys.argv.index('--desktop-window')
+        try:
+            run(sys.argv[index+1],sys.argv[index+2])
+        except Exception as exc:
+            from pathlib import Path
+            folder=Path(sys.argv[index+2])
+            folder.mkdir(parents=True,exist_ok=True)
+            import traceback
+            (folder/'window-error.log').write_text(traceback.format_exc(),encoding='utf-8')
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0,'桌面窗口未能启动。请检查 Microsoft WebView2 Runtime 是否已安装。\n错误详情保存在数据目录的 window-error.log。','强芯待办',0x10)
+        return
     if getattr(sys, 'frozen', False):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        stream = (DATA_DIR / 'runtime.log').open('a', encoding='utf-8', buffering=1)
+        from pathlib import Path
+        from runtime_paths import APP_DIR
+        log_dir = DATA_DIR
+        if '--portable' in sys.argv:
+            log_dir = APP_DIR / 'data'
+        if '--data' in sys.argv:
+            log_dir = Path(sys.argv[sys.argv.index('--data')+1]).resolve().parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stream = (log_dir / 'runtime.log').open('a', encoding='utf-8', buffering=1)
         sys.stdout = stream
         sys.stderr = stream
     from app import main as launch

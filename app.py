@@ -30,6 +30,9 @@ DEFAULTS = dict(mode="wechat", enabled=True, start="00:00", end="23:59",
 
 class RetryableSendError(RuntimeError):
     """确定尚未按下发送键的失败，可自动重试。"""
+    def __init__(self,message,retry_delay=60):
+        super().__init__(message)
+        self.retry_delay=retry_delay
 
 
 def now():
@@ -123,9 +126,11 @@ def transport(task, mode):
                 raise RuntimeError("微信接入程序未返回结果") from None
         if not result.get("ok"):
             error = RetryableSendError if result.get("retryable") is True else RuntimeError
+            if error is RetryableSendError:
+                raise error(result.get('error','微信发送未确认'),retry_delay=1 if result.get('deferred') else 60)
             raise error(result.get("error", "微信发送未确认"))
         return {"status": "operated", "detail": result["detail"]}
-    process = subprocess.run([sys.executable, str(ROOT / "wechat_adapter.py")],
+    process = subprocess.run([sys.executable, '-X', 'utf8', str(ROOT / "wechat_adapter.py")],
                              input=json.dumps(task, ensure_ascii=False),
                              text=True, encoding="utf-8", capture_output=True,
                              timeout=100, cwd=ROOT)
@@ -135,6 +140,8 @@ def transport(task, mode):
         raise RuntimeError("微信接入程序未返回有效结果，请检查本地运行日志") from None
     if not result.get("ok"):
         error = RetryableSendError if result.get("retryable") is True else RuntimeError
+        if error is RetryableSendError:
+            raise error(result.get('error','微信发送未确认'),retry_delay=1 if result.get('deferred') else 60)
         raise error(result.get("error", "微信发送未确认"))
     return {"status": "operated", "detail": result["detail"]}
 
@@ -411,6 +418,8 @@ def serve(app, port):
             path = urlsplit(self.path).path
             if path == "/api/state":
                 return self.respond(app.snapshot())
+            if path == '/api/backup':
+                return self.respond(app.backup().read_bytes(), content_type='application/octet-stream')
             if path == "/api/diagnostic":
                 return self.respond(diagnostic())
             files = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"),
@@ -429,7 +438,7 @@ def serve(app, port):
                 return self.respond({"error": "不允许跨站请求"}, 403)
             try:
                 size = int(self.headers.get("Content-Length", "0"))
-                if not 0 < size <= 16384:
+                if not 0 < size <= (28*1024*1024 if urlsplit(self.path).path == '/api/data/restore' else 16384):
                     raise ValueError("请求内容过大或为空")
                 body = json.loads(self.rfile.read(size).decode("utf-8"))
                 if not isinstance(body, dict):
@@ -439,6 +448,21 @@ def serve(app, port):
                     app.save_settings(body)
                 elif path == "/api/tasks":
                     app.create(body)
+                elif path == '/api/remind-all':
+                    count = app.enqueue(body.get('task_ids'))
+                    return self.respond({**app.snapshot(), 'queued_added': count})
+                elif path == '/api/data/restore':
+                    app.restore(body.get('content', ''))
+                elif path == '/api/tasks/delete-many':
+                    app.delete_many(body.get('task_ids'),restore=body.get('restore') is True)
+                elif path == '/api/window/open':
+                    if not getattr(app,'open_window',None):
+                        raise ValueError('请使用桌面软件启动')
+                    app.open_window()
+                elif path == '/api/widget/reset':
+                    if not getattr(app,'widget',None):
+                        raise ValueError('请使用桌面软件启动')
+                    app.widget.reset_position()
                 elif path == "/api/notifications/test":
                     if app.notifier is None:
                         raise ValueError("桌面通知尚未就绪，请用桌面软件或 start.bat 启动")
@@ -448,8 +472,7 @@ def serve(app, port):
                     if body.get("action") == "check":
                         return self.respond(app.check_task(task_id))
                     elif body.get("action") == "remind":
-                        if not app.dispatch(task_id, manual=True, live_confirmed=body.get("live_confirmed") is True):
-                            raise ValueError("正在处理另一条提醒，请稍后重试")
+                        app.enqueue([task_id])
                     else:
                         app.update(task_id, body)
                 else:
@@ -474,7 +497,8 @@ def main(desktop=False):
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-tray", action="store_true")
-    parser.add_argument("--data", type=Path, default=DATA_DIR / "reminders.db")
+    parser.add_argument("--data", type=Path)
+    parser.add_argument('--portable', action='store_true')
     args = parser.parse_args()
     url = f"http://127.0.0.1:{args.port}"
     try:
@@ -490,8 +514,9 @@ def main(desktop=False):
                 print(f"待办提醒已经运行，打开页面：{url}", flush=True)
                 if not args.no_browser:
                     if desktop:
-                        from desktop_runtime import open_window
-                        open_window(url)
+                        from urllib.request import Request
+                        req=Request(url+'/api/window/open',data=b'{}',headers={'Content-Type':'application/json','X-Reminder-Token':state['token']})
+                        with opener.open(req,timeout=5):pass
                     else:
                         webbrowser.open(url)
                 return
@@ -499,7 +524,17 @@ def main(desktop=False):
             pass
         print(f"端口 {args.port} 已占用。若程序已启动，请访问 http://127.0.0.1:{args.port}；否则使用 --port 指定其他端口。")
         return
-    app = ReminderApp(args.data)
+    from runtime_paths import default_database
+    from v11_app import ReminderApp as QueuedReminderApp
+    app = QueuedReminderApp(args.data or default_database(args.portable))
+    if FROZEN and args.data is None and not args.portable:
+        from startup import startup_enabled,set_startup
+        if startup_enabled():
+            try:
+                set_startup(True,database=app.path)
+            except (OSError,ValueError) as exc:
+                import logging
+                logging.getLogger(__name__).warning('自启动副本未更新：%s',exc)
     server.reminders = app
     shell = None
     if desktop and not args.no_tray:
@@ -507,12 +542,14 @@ def main(desktop=False):
         shell = DesktopShell(app, server, url)
         shell.start()
         app.notifier = shell.notify
+        app.open_window = shell.open
     threading.Thread(target=app.run, daemon=True).start()
     print(f"微信待办提醒已启动：{url}（{BUILD}）\n保存提醒任务后按计划自动执行；重启保留调度设置。关闭程序将停止调度。", flush=True)
     if not args.no_browser:
         if desktop:
             from desktop_runtime import open_window
-            open_window(url)
+            if shell:shell.open()
+            else:open_window(url)
         else:
             webbrowser.open(url)
     try:
