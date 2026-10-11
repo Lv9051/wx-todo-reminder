@@ -90,7 +90,7 @@ function render(){
  $("#engine-description").textContent=cfg.mode==="preview"?"到点只生成预览记录": "提醒自己弹桌面通知；提醒别人自动发微信";
  $("#toggle-engine").textContent=cfg.enabled?"暂停提醒":"开启提醒";$("#clock").textContent=formatTime(state.server_time)+" · 北京时间";
  $("#notification-state").textContent=state.desktop_notifications?"桌面通知已就绪；关闭页面后仍能提醒。":"请使用桌面软件或 start.bat 启动，让程序驻留托盘。";
- $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.1"} · 本地保存`;
+ $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.2"} · 本地保存`;
  $("#data-location").textContent=state.data_path?"数据位置："+state.data_path:"";
  $("#queue-count").textContent=state.queue_count?state.queue_count+" 条提醒排队中":"";
  for(const id of selected)if(!state.tasks.some(t=>t.id===id&&!['done','deleted'].includes(t.status)))selected.delete(id);

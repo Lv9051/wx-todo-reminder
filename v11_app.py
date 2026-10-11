@@ -467,7 +467,7 @@ class ReminderApp(LegacyApp):
                     db.execute("UPDATE events SET status='sending',at=?,detail='正在发送汇总提醒' WHERE id=?", (iso(value), job['event_id']))
             members = list(dict.fromkeys(member for job in jobs for member in json.loads(job['members'])))
             text = '\n\n'.join(('、'.join(json.loads(job['members']))+'：\n' if job['target_type']=='group' and len(jobs)>1 else '')+job['title'] for job in jobs)
-            message = ('提醒一下，有几件事待跟进：' if len(jobs)>1 else '提醒一下：')+'\n\n'+text
+            message = '【待办提醒 】\n'+text+'\n请完成后联系任务管理员标记完成。'
             title = f'待办提醒 · {len(jobs)} 件' if len(jobs)>1 else '待办提醒'
             payload = dict(id=first['task_id'], title=jobs[0]['title'], target_type=first['target_type'], group_name=first['route'],
                            member=members[0] if members else '', members=members, message=message,
