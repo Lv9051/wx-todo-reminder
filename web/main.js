@@ -90,7 +90,7 @@ function render(){
  $("#engine-description").textContent=cfg.mode==="preview"?"到点只生成预览记录": "提醒自己弹桌面通知；提醒别人自动发微信";
  $("#toggle-engine").textContent=cfg.enabled?"暂停提醒":"开启提醒";$("#clock").textContent=formatTime(state.server_time)+" · 北京时间";
  $("#notification-state").textContent=state.desktop_notifications?"桌面通知已就绪；关闭页面后仍能提醒。":"请使用桌面软件或 start.bat 启动，让程序驻留托盘。";
- $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.0"} · 本地保存`;
+ $("#test-notification").disabled=!state.desktop_notifications;$("#version-label").textContent=`v${state.version||"1.4.1"} · 本地保存`;
  $("#data-location").textContent=state.data_path?"数据位置："+state.data_path:"";
  $("#queue-count").textContent=state.queue_count?state.queue_count+" 条提醒排队中":"";
  for(const id of selected)if(!state.tasks.some(t=>t.id===id&&!['done','deleted'].includes(t.status)))selected.delete(id);
@@ -99,7 +99,7 @@ function render(){
  $("#widget-state").textContent=({visible:'小窗已显示',hidden:'小窗已关闭',failed:'小窗启动失败，请重启软件或查看运行日志',unavailable:'请在桌面软件中开启小窗'})[state.widget_state]||'';
  renderTasks();renderHistory();renderEvents();
  if(!settingsDirty){const f=$("#settings-form");f.elements.mode.value=cfg.mode;for(const k of ["start","end","daily_limit"])f.elements[k].value=cfg[k];f.elements.weekdays.checked=cfg.weekdays;for(const k of ["sound_enabled","widget_enabled"])f.elements[k].checked=k==="widget_enabled"?Boolean(cfg[k]):cfg[k]!==false;f.elements.startup_enabled.checked=Boolean(state.startup_enabled)}
- if($('#task-dialog').open)updateConflict();
+ if($('#task-dialog').open)updateTargetFields();
 }
 function card(t,history=false){
  const local=t.target_type==="local",self=t.target_type==="self",busy=pending.has(t.id),review=state.attention_tasks?.some(item=>item.id===t.id);
@@ -120,7 +120,7 @@ function renderTasks(){
  const q=$("#search").value.trim().toLowerCase(),tasks=visibleTasks();
  const key=JSON.stringify([tasks,scope,filter,q,selectMode,state.settings.enabled,state.settings.mode,state.attention_tasks,[...pending],[...selected]]);
  let html=tasks.map(t=>card(t)).join('');
- if(scope==='delegated'&&tasks.length){const groups=new Map();for(const t of tasks){const name=t.owner_name||(t.recipients||[]).join('、')||'未指定负责人';if(!groups.has(name))groups.set(name,[]);groups.get(name).push(t)}html=[...groups].map(([name,items])=>`<details class="person-group" data-group="${escapeHTML(name)}" open><summary>${escapeHTML(name)}<span>${items.length} 项</span></summary><div class="task-list">${items.map(t=>card(t)).join('')}</div></details>`).join('')}
+ if(scope==='delegated'&&tasks.length){const groups=new Map();for(const t of tasks){const name=t.owner_name||(t.recipients||[]).join('、')||'未填写交办人';if(!groups.has(name))groups.set(name,[]);groups.get(name).push(t)}html=[...groups].map(([name,items])=>`<details class="person-group" data-group="${escapeHTML(name)}" open><summary>${escapeHTML(name)}<span>${items.length} 项</span></summary><div class="task-list">${items.map(t=>card(t)).join('')}</div></details>`).join('')}
  writeHTML("#task-list",key,tasks.length?html:empty(q?"没找到这件事":filter==="paused"?"没有暂停的待办":"这里还没有待办",q?"换一个关键词试试。":scope==='mine'?"记下自己的事，需要提醒时再设置。":"交办事项单独放在这里，设置后按计划提醒。",!q&&scope==='mine'));
  $("#bulk-bar").hidden=!selectMode;$("#selected-count").textContent='已选 '+selected.size+' 项';$("#remind-selected").disabled=!tasks.some(t=>selected.has(t.id)&&t.status==='active'&&t.target_type!=='local');$("#delete-selected").disabled=!selected.size;
  $("#select-visible").checked=!!tasks.length&&tasks.every(t=>selected.has(t.id));
@@ -156,7 +156,11 @@ function setDue(date){
  $("#task-form").elements.first_due.value=bjParts(date).slice(0,16);updateScheduleSummary();
 }
 function updateScheduleSummary(){
- const f=$("#task-form");$("#schedule-summary").textContent=f.elements.first_due.value?"首次提醒："+formatTime(f.elements.first_due.value+":00+08:00")+" · 北京时间":"请选择提醒时间";
+ const f=$("#task-form"),due=f.elements.first_due.value,el=$('#schedule-summary'),current=editing?findTask(editing):null;
+ const scheduleChanged=!!current&&(due!==firstDueInitial||f.elements.repeat.checked!==Boolean(current.repeat)||f.elements.target_type.value!==current.target_type||Number(f.elements.interval_hours.value)!==Number(current.interval_value)||f.elements.interval_unit.value!==current.interval_unit);
+ let text=!due?'请选择首次提醒时间':current?.status==='done'?'这件事已完成，保存后仍保留在历史。':current?.status==='paused'?'这件事的提醒已暂停，保存后仍保持暂停。':current?.reminder_finished&&!scheduleChanged?'这件事已提醒过；只修改文字，不会再次提醒。':!state?.settings.enabled?'自动提醒已暂停；保存计划后，需恢复全局提醒才会执行。':state.settings.mode==='preview'?'当前为预览模式：到点只生成记录，不通知、不发微信。':new Date(due+':00+08:00')<=serverNow()?'保存后尽快提醒':'首次提醒：'+formatTime(due+':00+08:00')+' · 北京时间';
+ if(due&&current?.status!=='done'&&current?.status!=='paused'&&!(current?.reminder_finished&&!scheduleChanged)&&state?.settings.enabled&&state.settings.mode!=='preview')text+=f.elements.repeat.checked?'；之后每 '+f.elements.interval_hours.value+' '+{hours:'小时',days:'天',weeks:'周'}[f.elements.interval_unit.value]+' 提醒，直到完成。':'，只提醒一次。';
+ el.textContent=text;el.classList.toggle('schedule-paused',!state?.settings.enabled||current?.status==='paused');
  updateConflict();
 }
 function updateTargetFields(){
@@ -164,13 +168,13 @@ function updateTargetFields(){
  reveal($('#reminder-options'),!local,$('#task-dialog').open);f.elements.target_type.disabled=local;
  $("#recipient-fields").hidden=!wx;$("#member-field").hidden=type!=="group";$("#schedule-fields").hidden=local;
  f.elements.group_name.disabled=!wx;f.elements.group_name.required=wx;f.elements.member.disabled=type!=="group";f.elements.member.required=type==="group";
- for(const k of ["first_due","interval_hours","interval_unit","repeat","auto_start"])f.elements[k].disabled=local;
+ for(const k of ["first_due","interval_hours","interval_unit","repeat"])f.elements[k].disabled=local;
  $("#target-label").textContent=type==="group"?"完整微信群名":"联系人（每行一位）";f.elements.group_name.rows=type==="group"?1:2;f.elements.group_name.maxLength=type==="group"?100:3030;f.elements.group_name.placeholder=type==="group"?"完整、唯一的群名":"每行一个完整、唯一的联系人备注名";
  $("#target-hint").textContent={local:"只保存到清单，不发送任何提醒。",self:"到点弹出 Windows 通知，不需要打开微信。",contact:"自动搜索联系人并私聊，无需置顶。",group:"每行填写一个成员名称。同群到期事项会汇总，发出真正的 @。"}[type];
  const current=editing?findTask(editing):null;
- $("#save-hint").textContent=current?.status==='done'?'事项仍保留在历史，不重新开启提醒。':current?.status==='paused'?'提醒保持暂停；保存后可从清单恢复。':current?.reminder_finished?'这件事已提醒过，修改文字不会再次提醒；修改时间或周期会更新计划。':wx?"微信需登录，电脑桌面需解锁；保存后按计划执行，可随时暂停。":"关闭主窗口后仍可通知你，请让软件在托盘保持运行。";
+ $("#save-hint").textContent=current?.status==='done'?'重新开启请使用历史事项的更多菜单。':current?.status==='paused'?'需要继续提醒时，在清单的更多菜单中恢复。':!state?.settings.enabled?'可在主清单顶部恢复自动提醒；保存不会改变全局暂停状态。':state.settings.mode==='preview'?'需要实际提醒时，到设置中切换为正常提醒。':wx?"到点自动发送，无需再点按钮。微信需登录，电脑桌面需解锁。":"到点弹出桌面通知。关闭主窗口后，请让软件在托盘保持运行。";
  $("#repeat-fields").hidden=!f.elements.repeat.checked;
- updateConflict();
+ updateOwner();updateScheduleSummary();
 }
 function updateConflict(){
  const f=$('#task-form'),el=$('#schedule-conflict');if(!state||!f.elements.reminder_enabled.checked||!['group','contact'].includes(f.elements.target_type.value)||!f.elements.first_due.value){el.hidden=true;return}
@@ -208,7 +212,6 @@ function openTask(task=null,options={}){
  f.elements.reminder_enabled.checked=Boolean(options.reminder||(task&&task.target_type!=="local"));if(options.title)f.elements.title.value=options.title;
  f.elements.target_type.value=task?.target_type==="local"?"self":task?.target_type??"self";f.elements.repeat.checked=task?Boolean(task.repeat):false;
  f.elements.owner_scope.value=task?.owner_scope??(scope==='delegated'?'delegated':'mine');f.elements.owner_name.value=task?.owner_name??'';ownerEdited=!!task||scope==='delegated';updateOwner();
- f.elements.auto_start.checked=state?.settings.mode==='wechat'&&Boolean(state.settings.enabled);$('#auto-start-field').hidden=!!task&&task.target_type!=='local';
  setDue(task&&task.target_type!=="local"?new Date(task.next_due):serverNow());firstDueInitial=f.elements.first_due.value;updateTargetFields();updateInterval();draftInitial=JSON.stringify(captureDraft());
  const stored=draftMap()[String(editing??'new')];if(!options.skipStored&&!options.title&&stored&&applyDraft(stored)){$('#draft-status').hidden=false;if(task&&task.revision!==stored.revision){editingRevision=task.revision;$('#task-error').textContent='事项已有新变化，草稿仍保留；请核对内容和提醒时间后保存。';$('#task-error').hidden=false}}
  if(!$('#task-dialog').open)$("#task-dialog").showModal();f.elements.title.focus();
@@ -222,19 +225,20 @@ $("#task-form").elements.target_type.onchange=()=>{const f=$('#task-form');if(!e
 $("#task-form").elements.repeat.onchange=updateTargetFields;
 $("#task-form").elements.reminder_enabled.onchange=updateTargetFields;
 for(const b of document.querySelectorAll('[data-interval]'))b.onclick=()=>{$("#task-form").elements.interval_hours.value=b.dataset.interval;$("#task-form").elements.interval_unit.value=b.dataset.unit;updateInterval();document.querySelectorAll('[data-interval]').forEach(x=>x.classList.toggle('selected',x===b))};
-function updateInterval(){const f=$("#task-form"),hours=f.elements.interval_unit.value==="hours";f.elements.interval_hours.min=hours?.1:1;f.elements.interval_hours.step=hours?.1:1;f.elements.interval_hours.max={hours:720,days:30,weeks:4}[f.elements.interval_unit.value];}
-function updateOwner(){$('#owner-field').hidden=$('#task-form').elements.owner_scope.value!=='delegated'}
+function updateInterval(){const f=$("#task-form"),hours=f.elements.interval_unit.value==="hours";f.elements.interval_hours.min=hours?.1:1;f.elements.interval_hours.step=hours?.1:1;f.elements.interval_hours.max={hours:720,days:30,weeks:4}[f.elements.interval_unit.value];updateScheduleSummary()}
+function updateOwner(){const f=$('#task-form');$('#owner-field').hidden=f.elements.owner_scope.value!=='delegated';$('#owner-hint').textContent=f.elements.reminder_enabled.checked&&['group','contact'].includes(f.elements.target_type.value)?'不填时按微信提醒对象分组；填写此处不会改变微信收件人。':'用于把交办事项按人分组，方便查看这个人还有哪些事没完成。'}
 $('#task-form').elements.owner_scope.onchange=()=>{ownerEdited=true;updateOwner()};
 $("#task-form").elements.interval_unit.onchange=updateInterval;
+$("#task-form").elements.interval_hours.oninput=updateScheduleSummary;
 $("#task-form").elements.first_due.oninput=updateScheduleSummary;
  for(const name of ['group_name','member'])$('#task-form').elements[name].oninput=updateConflict;
  $('#task-dialog').addEventListener('close',()=>{savedDraft=null;$('#draft-return').hidden=true;$('#task-error').hidden=true});
  $('#task-form').addEventListener('input',()=>{storeDraft();$('#task-error').hidden=true});$('#task-form').addEventListener('change',()=>storeDraft());
 $("#task-form").onsubmit=async e=>{
  e.preventDefault();const f=e.target,button=f.querySelector('[type=submit]');if(button.disabled)return;button.disabled=true;button.textContent="保存中…";
- const data=Object.fromEntries(new FormData(f));data.target_type=f.elements.reminder_enabled.checked?f.elements.target_type.value:"local";delete data.reminder_enabled;if(data.first_due)data.first_due+=":00+08:00";data.interval_value=Number(data.interval_hours||3);delete data.interval_hours;data.recipients=(data.target_type==="group"?f.elements.member.value:data.target_type==="contact"?f.elements.group_name.value:"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);data.repeat=f.elements.repeat.checked;data.auto_start=data.target_type!=="local"&&f.elements.auto_start.checked&&(!editing||findTask(editing)?.target_type==='local');if(editing){data.action="edit";data.expected_revision=editingRevision}
+ const data=Object.fromEntries(new FormData(f));data.target_type=f.elements.reminder_enabled.checked?f.elements.target_type.value:"local";delete data.reminder_enabled;if(data.first_due)data.first_due+=":00+08:00";data.interval_value=Number(data.interval_hours||3);delete data.interval_hours;data.recipients=(data.target_type==="group"?f.elements.member.value:data.target_type==="contact"?f.elements.group_name.value:"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);data.repeat=f.elements.repeat.checked;data.auto_start=false;if(editing){data.action="edit";data.expected_revision=editingRevision}
  if(editing&&findTask(editing)?.target_type!=='local'&&f.elements.first_due.value===firstDueInitial)delete data.first_due;
- try{const value=await request(editing?`/api/tasks/${editing}`:"/api/tasks",data);accept(value);storeDraft(true);if(savedDraft){restoreDraft();toast('已有事项已保存，回到保留的草稿')}else{await dismissTask(true);filter="all";scope=data.owner_scope;$('#status-filter').value=filter;setView("tasks");renderTasks();toast('待办已保存')}}catch(error){storeDraft();$('#task-error').textContent=error.message;$('#task-error').hidden=false;$('#task-error').scrollIntoView({block:'nearest'});toast(error.message,true)}
+ try{const value=await request(editing?`/api/tasks/${editing}`:"/api/tasks",data);accept(value);storeDraft(true);if(savedDraft){restoreDraft();toast('已有事项已保存，回到保留的草稿')}else{await dismissTask(true);filter="all";scope=data.owner_scope;$('#status-filter').value=filter;setView("tasks");renderTasks();toast(data.target_type==='local'?'待办已保存':!state.settings.enabled?'计划已保存；自动提醒仍处于暂停状态':state.settings.mode==='preview'?'计划已保存；当前只预览，不实际提醒':'待办已保存，将按计划自动提醒')}}catch(error){storeDraft();$('#task-error').textContent=error.message;$('#task-error').hidden=false;$('#task-error').scrollIntoView({block:'nearest'});toast(error.message,true)}
  finally{button.disabled=false;button.textContent="保存待办"}
 };
 $("#task-form").addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter'&&!e.isComposing){e.preventDefault();$('#task-form').requestSubmit()}});

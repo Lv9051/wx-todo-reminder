@@ -58,6 +58,8 @@ class FloatingTodo:
         self.user=ctypes.WinDLL('user32',use_last_error=True)
         self.user.SetTimer.argtypes=(wintypes.HWND,ctypes.c_size_t,wintypes.UINT,ctypes.c_void_p)
         self.user.SetTimer.restype=ctypes.c_size_t;self.user.KillTimer.argtypes=(wintypes.HWND,ctypes.c_size_t)
+        self.user.UpdateLayeredWindow.argtypes=(wintypes.HWND,wintypes.HDC,ctypes.POINTER(wintypes.POINT),ctypes.c_void_p,wintypes.HDC,ctypes.c_void_p,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD)
+        self.user.UpdateLayeredWindow.restype=wintypes.BOOL
         self.gdi=ctypes.WinDLL('gdi32',use_last_error=True)
         self.gdi.CreateDIBSection.argtypes=(wintypes.HDC,ctypes.c_void_p,wintypes.UINT,ctypes.POINTER(ctypes.c_void_p),wintypes.HANDLE,wintypes.DWORD)
         self.gdi.CreateDIBSection.restype=wintypes.HANDLE
@@ -88,6 +90,20 @@ class FloatingTodo:
         self.anchor=clamp_position(self.anchor,self._area(),*self._size())
         self.gui.SetWindowPos(self.hwnd,self.con.HWND_TOPMOST,*self.anchor,*self._size(),self.con.SWP_NOACTIVATE)
         self._paint()
+
+    def _move(self,position):
+        """只更新位置，复用 Windows 已缓存的透明图层，不重新绘制文字和阴影。"""
+        position=clamp_position(position,self._area(),*self._size())
+        if position==self.anchor:return
+        point=wintypes.POINT(*position)
+        if not self.user.UpdateLayeredWindow(self.hwnd,None,ctypes.byref(point),None,None,None,0,None,0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.anchor=position
+
+    def _finish_drag(self):
+        if self.drag is None:return
+        self.drag=None
+        if self.dragged:self.app.save_settings(dict(widget_position=list(self.anchor)))
 
     def _poll(self,initial=False):
         with self.app.lock,self.app.connect() as db:
@@ -233,6 +249,7 @@ class FloatingTodo:
         if message==c.WM_ERASEBKGND:return 1
         if message==c.WM_TIMER:
             if self.app.stop.is_set():g.DestroyWindow(hwnd);return 0
+            if self.drag:return 0
             if time.monotonic()-self.last_poll>=1:self._poll()
             if self.hover is not None:
                 px,py=g.ScreenToClient(hwnd,g.GetCursorPos())
@@ -242,7 +259,7 @@ class FloatingTodo:
         if message==c.WM_MOUSEMOVE:
             if self.drag:
                 point,anchor=self.drag;mouse=g.GetCursorPos();dx,dy=mouse[0]-point[0],mouse[1]-point[1];self.dragged=self.dragged or abs(dx)+abs(dy)>3
-                self.anchor=clamp_position((anchor[0]+dx,anchor[1]+dy),self._area(),*self._size());self._layout()
+                self._move((anchor[0]+dx,anchor[1]+dy))
             elif self.thumb_drag is not None:
                 maximum,_,length=scrollbar_geometry(self.content_height,self.offset)
                 self.offset=round(maximum*max(0,min(y-self.thumb_drag-LIST_TOP,LIST_BOTTOM-LIST_TOP-length))/max(1,LIST_BOTTOM-LIST_TOP-length));self._paint()
@@ -275,12 +292,11 @@ class FloatingTodo:
             return 0
         if message==c.WM_LBUTTONUP:
             if self.drag:
-                self.drag=None;g.ReleaseCapture()
-                if self.dragged:self.app.save_settings(dict(widget_position=list(self.anchor)))
-                elif not self.expanded:self.expanded=True;self._layout()
+                self._finish_drag();g.ReleaseCapture()
+                if not self.dragged and not self.expanded:self.expanded=True;self._layout()
             if self.thumb_drag is not None:self.thumb_drag=None;g.ReleaseCapture();self._paint()
             return 0
-        if message==c.WM_CAPTURECHANGED:self.drag=None;self.thumb_drag=None;return 0
+        if message==c.WM_CAPTURECHANGED:self._finish_drag();self.thumb_drag=None;return 0
         if message==c.WM_MOUSEWHEEL and self.expanded:
             delta=ctypes.c_short(wparam>>16).value;self.offset=max(0,min(scrollbar_geometry(self.content_height,self.offset)[0],self.offset-delta/120*52));self.menu=False;self._paint();return 0
         if message==c.WM_RBUTTONUP:self.menu=not self.menu;self._paint();return 0
